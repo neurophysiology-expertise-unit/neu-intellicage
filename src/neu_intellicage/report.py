@@ -92,6 +92,66 @@ def _programmed_target_analysis(session, output: Path) -> None:
         opposite_corner_preference=("at_opposite_corner", "mean"),
     ).reset_index()
     daily.to_csv(output / "programmed_target_performance.csv", index=False)
+    corner_daily = x.groupby(["AnimalName", "date", "Corner"]).size().rename("corner_visits").reset_index()
+    corner_daily["total_visits"] = corner_daily.groupby(["AnimalName", "date"])["corner_visits"].transform("sum")
+    corner_daily["preference"] = corner_daily["corner_visits"] / corner_daily["total_visits"]
+    corner_daily = corner_daily.merge(targets[["AnimalName", "date", "target_corner"]],
+                                      on=["AnimalName", "date"], how="left")
+    corner_daily["is_programmed_target"] = corner_daily["Corner"].eq(corner_daily["target_corner"])
+    corner_daily.to_csv(output / "individual_daily_corner_preference.csv", index=False)
+
+    colors = {1: "tab:blue", 2: "tab:orange", 3: "tab:green", 4: "tab:red"}
+    animals = list(corner_daily["AnimalName"].unique())
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+    for ax, animal in zip(axes.flat, animals):
+        frame = corner_daily[corner_daily["AnimalName"].eq(animal)]
+        for corner in range(1, 5):
+            part = frame[frame["Corner"].eq(corner)]
+            ax.plot(pd.to_datetime(part["date"]), part["preference"], marker="o",
+                    color=colors[corner], label=f"C{corner}")
+        target = frame[frame["is_programmed_target"]]
+        ax.scatter(pd.to_datetime(target["date"]), target["preference"], s=105,
+                   facecolors="none", edgecolors="black", linewidths=1.5,
+                   zorder=5, label="Programmed target")
+        ax.axhline(.25, ls="--", color="0.55", lw=1)
+        ax.set(title=animal, ylim=(0, 1), ylabel="Daily visit proportion")
+        ax.tick_params(axis="x", rotation=30)
+    axes[0, 0].legend(frameon=False, ncol=3, fontsize=8)
+    fig.suptitle("Daily corner preference by individual animal\nBlack ring = target recorded by controller")
+    fig.tight_layout(); fig.savefig(output / "individual_daily_corner_preference.png", dpi=180); plt.close(fig)
+
+    for animal in animals:
+        frame = corner_daily[corner_daily["AnimalName"].eq(animal)].copy()
+        dates_for_animal = sorted(frame["date"].unique())
+        xpos = np.arange(len(dates_for_animal)); width = .19
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        for corner in range(1, 5):
+            part = frame[frame["Corner"].eq(corner)].set_index("date").reindex(dates_for_animal)
+            bars = ax.bar(xpos + (corner - 2.5) * width, part["preference"], width,
+                          color=colors[corner], label=f"Corner {corner}")
+            for bar, is_target in zip(bars, part["is_programmed_target"].fillna(False)):
+                if is_target:
+                    bar.set_edgecolor("black"); bar.set_linewidth(2.2)
+        ax.axhline(.25, ls="--", color="0.45", lw=1)
+        ax.set(xticks=xpos, xticklabels=[str(d)[5:] for d in dates_for_animal], ylim=(0, 1),
+               xlabel="Date", ylabel="Visit proportion", title=f"{animal}: daily corner preference")
+        ax.legend(frameon=False, ncol=4); fig.tight_layout()
+        safe_name = animal.lower().replace(" ", "_")
+        fig.savefig(output / f"{safe_name}_daily_corner_preference.png", dpi=180); plt.close(fig)
+
+    daily["daily_change_pp"] = daily.groupby("AnimalName")["current_target_accuracy"].diff() * 100
+    daily.to_csv(output / "individual_daily_learning_rate.csv", index=False)
+    opposite_dates = pd.to_datetime(daily.loc[daily["target_state"].eq("opposite target"), "date"])
+    first_opposite = opposite_dates.min() if len(opposite_dates) else pd.Timestamp.max
+    acquisition = daily[daily["target_state"].eq("acquisition target") &
+                        (pd.to_datetime(daily["date"]) < first_opposite)].copy()
+    slopes = []
+    for animal, frame in acquisition.groupby("AnimalName"):
+        frame = frame.sort_values("date")
+        slope = np.polyfit(np.arange(len(frame)), frame["current_target_accuracy"], 1)[0] * 100 if len(frame) > 1 else np.nan
+        slopes.append({"AnimalName": animal, "acquisition_slope_pp_per_day": slope,
+                       "days": len(frame), "definition": "OLS slope before first opposite-target day; correct-place visit proportion"})
+    pd.DataFrame(slopes).to_csv(output / "individual_acquisition_slopes.csv", index=False)
     cohort = daily.groupby(["date", "target_state"]).agg(
         current_target_accuracy=("current_target_accuracy", "mean"),
         acquisition_corner_preference=("acquisition_corner_preference", "mean"),
@@ -153,7 +213,12 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
         if next(x for x in summaries if x["session"] == sid)["conditioned_visits"]:
             report += [f"![Daily place accuracy](sessions/{sid}/tier2/daily_learning.png)", "",
                        f"![Programmed target corner](sessions/{sid}/target_corner_by_day.png)", "",
+                       f"![Individual daily corner preference](sessions/{sid}/individual_daily_corner_preference.png)", "",
                        f"![Performance under recorded schedule](sessions/{sid}/programmed_target_performance.png)", ""]
+    report += ["## Protocol diagnosis", "",
+               "The intended protocol was ordinary place reversal: maintain one correct corner during acquisition, switch once to the diagonally opposite corner, and keep that new corner active while the animal relearns. This is also how Voikar et al. (2018) describe Place/Reversal and how Roos et al. (2026) distinguish place-preference reversal from serial reversal.", "",
+               "The raw visit conditions instead encode this daily sequence: acquisition target on 13–16 July, opposite target on 17 July, acquisition target on 18 July, opposite target on 19 July, and acquisition target on 20 July. Because the archived experiment notes explicitly say the opposite target should hold, this is treated as a programming error in the day-pattern chain—not as the intended reversal procedure.", "",
+               "Consequently, 13–16 July can be used as acquisition. The isolated opposite-target days on 17 and 19 July and return days on 18 and 20 July are reported descriptively as alternating contingencies; they cannot establish a sustained reversal-learning curve.", ""]
     report += ["## Interpretation status", "",
                "This is a descriptive screening report. Treatment identity, light/dark schedule, exact phase-switch timestamps, reward contingencies, and whether the July animals belong to the Tau study require confirmation before inferential analysis.", "",
                "The programmed correct corner changes within the place-learning export. Therefore a single session-wide learning slope is not interpreted as acquisition or reversal until the intended schedule is confirmed.", ""]
