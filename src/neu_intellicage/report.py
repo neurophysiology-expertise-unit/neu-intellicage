@@ -10,7 +10,7 @@ import pandas as pd
 
 from .io import load_session
 from .metrics import add_time_fields, daily_learning
-from .plots import qc, tier1, tier2
+from .plots import nosepoke_acquisition, qc, tier1, tier2
 from .provenance import write_provenance
 
 
@@ -102,7 +102,10 @@ def _programmed_target_analysis(session, output: Path) -> None:
 
     colors = {1: "tab:blue", 2: "tab:orange", 3: "tab:green", 4: "tab:red"}
     animals = list(corner_daily["AnimalName"].unique())
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+    ncols = 2
+    nrows = int(np.ceil(len(animals) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 3.6 * nrows),
+                             sharex=True, sharey=True, squeeze=False)
     for ax, animal in zip(axes.flat, animals):
         frame = corner_daily[corner_daily["AnimalName"].eq(animal)]
         for corner in range(1, 5):
@@ -116,6 +119,8 @@ def _programmed_target_analysis(session, output: Path) -> None:
         ax.axhline(.25, ls="--", color="0.55", lw=1)
         ax.set(title=animal, ylim=(0, 1), ylabel="Daily visit proportion")
         ax.tick_params(axis="x", rotation=30)
+    for ax in axes.flat[len(animals):]:
+        ax.set_visible(False)
     axes[0, 0].legend(frameon=False, ncol=3, fontsize=8)
     fig.suptitle("Daily corner preference by individual animal\nBlack ring = target recorded by controller")
     fig.tight_layout(); fig.savefig(output / "individual_daily_corner_preference.png", dpi=180); plt.close(fig)
@@ -190,7 +195,9 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
         summaries.append(summary)
         qc(session, session_output / "qc")
         tier1(session, session_output / "tier1")
-        if summary["conditioned_visits"]:
+        if summary["nosepokes"]:
+            nosepoke_acquisition(session, session_output / "nosepoke")
+        if summary["conditioned_visits"] and item.get("run_tier2", True):
             tier2(session, session_output / "tier2", config.get("block_size", 100))
             targets = _target_by_day(session.visits)
             targets.to_csv(session_output / "target_corner_by_day.csv", index=False)
@@ -215,18 +222,22 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
                    f"![Hourly activity](sessions/{sid}/tier1/hourly_activity.png)", "",
                    "*Hourly activity profile.* For each mouse, visits are converted to visits per observed hour and then averaged by clock hour. The line is the animal mean and the blue band is SEM across animals. Gray indicates the nominal dark phase (19:00–07:00), which must be checked against the actual room light schedule before circadian interpretation.", "",
                    f"![Double-plotted actograms](sessions/{sid}/tier1/actograms.png)", "",
-                   "*Double-plotted actograms.* Each row is a recording day shown across 48 hours by repeating the following day alongside it. Darker pixels mean more visits. This makes daily timing, phase shifts and disrupted activity patterns visible; partial boundary days and unverified lighting limit formal interpretation.", "",
+                   "*Double-plotted actograms.* Each row is a recording day shown across 48 hours by repeating the following day alongside it. The shared grayscale colorbar reports visits per hour, with darker pixels indicating more visits on the same scale for every animal. This makes daily timing, phase shifts and disrupted activity patterns visible; partial boundary days and unverified lighting limit formal interpretation.", "",
                    f"![Inter-visit intervals](sessions/{sid}/tier1/inter_visit_intervals.png)", "",
                    "*Inter-visit interval distribution.* Time between consecutive visits for each animal, shown on a logarithmic x-axis. Leftward distributions indicate rapid repeated visiting; long right tails indicate extended inactive periods. This is an activity-organization measure, not a memory score.", ""]
-        if next(x for x in summaries if x["session"] == sid)["conditioned_visits"]:
+        if next(x for x in summaries if x["session"] == sid)["nosepokes"]:
+            report += [f"![Individual daily nose-poke acquisition](sessions/{sid}/nosepoke/daily_nosepoke_acquisition.png)", "",
+                       "*Individual daily nose-poke acquisition.* Each colored line is one mouse. The value is the proportion of its corner visits that contained at least one nose-poke. A mouse whose curve rises earlier began performing the operant response earlier. This is preferable to raw poke totals for acquisition because repeated pokes within one visit cannot dominate the score; `nosepokes_per_visit` is retained in the accompanying CSV as a secondary measure.", ""]
+        if (next(x for x in summaries if x["session"] == sid)["conditioned_visits"]
+                and item.get("run_tier2", True)):
             report += [f"![Daily place accuracy](sessions/{sid}/tier2/daily_learning.png)", "",
-                       "*Daily programmed-corner accuracy.* Thin colored lines are individual mice; the black line and band are the cohort mean ± SEM. The value is the proportion of visits to the corner marked correct by the controller on that day, with 25% as the four-corner reference. Because the controller alternated targets after 16 July, this is performance under the executed schedule—not a continuous reversal-learning curve.", "",
+                       item.get("daily_accuracy_caption", "*Daily programmed-corner accuracy.* Thin colored lines are individual mice; the black line and band are the cohort mean ± SEM. The value is the proportion of visits to the corner marked correct by the controller on that day, with 25% as the four-corner reference. Interpret changes only after checking the controller-recorded target audit below."), "",
                        f"![Programmed target corner](sessions/{sid}/target_corner_by_day.png)", "",
-                       "*Programmed target audit.* The correct corner reconstructed from `CornerCondition` for every mouse and day. This is a configuration/QC plot rather than an animal-performance plot. It reveals the unintended original–opposite alternation on 17–20 July.", "",
+                       item.get("target_audit_caption", "*Programmed target audit.* The correct corner reconstructed from `CornerCondition` for every mouse and day. This is a configuration/QC plot rather than an animal-performance plot; it must agree with the written protocol before learning curves are interpreted."), "",
                        f"![Individual daily corner preference](sessions/{sid}/individual_daily_corner_preference.png)", "",
                        "*Individual daily corner preference.* One panel per mouse; each colored curve is the proportion of that day's visits made to one physical corner. Black rings mark the corner programmed as correct. This is the closest reconstruction of the IntelliCage preference display while retaining day-by-day resolution. Separate bar-chart files for each animal are stored beside this figure.", "",
                        f"![Performance under recorded schedule](sessions/{sid}/programmed_target_performance.png)", "",
-                       "*Original versus opposite target.* Cohort-average preference for the original acquisition corner (blue), its diagonal opposite (orange), and the currently programmed target (black). A/O labels show which contingency ran that day. It demonstrates that behavior redirected on opposite-target days but cannot substitute for a sustained reversal experiment.", "",
+                       item.get("programmed_target_caption", "*Original versus opposite target.* Cohort-average preference for the original acquisition corner (blue), its diagonal opposite (orange), and the currently programmed target (black). A/O labels show which contingency was recorded that day. This distinguishes acquisition, opposite-target exposure, and any unintended return to the original target."), "",
                        f"![Visit-block learning](sessions/{sid}/tier2/visit_block_learning.png)", "",
                        "*Visit-block learning.* Correct-place proportion in consecutive blocks of 100 visits per mouse. This gives finer acquisition resolution than calendar days and avoids treating a quiet day as equally informative as a busy day. Blocks spanning a midnight target change require caution; they are not phase-pure.", "",
                        f"![Activity and accuracy](sessions/{sid}/tier2/activity_accuracy.png)", "",
@@ -234,16 +245,26 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
                        f"![Error decomposition](sessions/{sid}/tier2/error_decomposition.png)", "",
                        "*Error decomposition.* Daily cohort mean place-error rate and side-error rate. Place errors use visits as the denominator; side errors use nosepokes, so their absolute magnitudes are not directly interchangeable. The plot identifies when spatial versus local left/right responding contributes to errors.", "",
                        f"![Terminal accuracy](sessions/{sid}/tier2/terminal_accuracy.png)", "",
-                       "*Terminal accuracy.* One dot per mouse for its final, potentially incomplete, 100-visit block; the dashed line is 25%. Because the experiment returned to the acquisition target on 20 July, this is terminal performance under that restored target—not terminal reversal accuracy.", "",
+                       item.get("terminal_accuracy_caption", "*Terminal accuracy.* One dot per mouse for its final, potentially incomplete, 100-visit block; the dashed line is 25%. Its biological meaning depends on the target active at the session end and should not be called terminal reversal accuracy if the schedule changed again."), "",
                        f"![Trials to criterion](sessions/{sid}/tier2/trials_to_criterion.png)", "",
                        "*Trials to criterion.* Visits required to produce two consecutive 100-visit blocks at ≥50% correct. Missing dots mean the operational criterion was not reached. The threshold is a transparent descriptive rule, not a literature-derived inferential test, and target changes can reset its biological meaning.", ""]
-    report += ["## Protocol diagnosis", "",
-               "The intended protocol was ordinary place reversal: maintain one correct corner during acquisition, switch once to the diagonally opposite corner, and keep that new corner active while the animal relearns. This is also how Voikar et al. (2018) describe Place/Reversal and how Roos et al. (2026) distinguish place-preference reversal from serial reversal.", "",
-               "The raw visit conditions instead encode this daily sequence: acquisition target on 13–16 July, opposite target on 17 July, acquisition target on 18 July, opposite target on 19 July, and acquisition target on 20 July. Because the archived experiment notes explicitly say the opposite target should hold, this is treated as a programming error in the day-pattern chain—not as the intended reversal procedure.", "",
-               "Consequently, 13–16 July can be used as acquisition. The isolated opposite-target days on 17 and 19 July and return days on 18 and 20 July are reported descriptively as alternating contingencies; they cannot establish a sustained reversal-learning curve.", ""]
-    report += ["## Interpretation status", "",
-               "This is a descriptive screening report. Treatment identity, light/dark schedule, exact phase-switch timestamps, reward contingencies, and whether the July animals belong to the Tau study require confirmation before inferential analysis.", "",
-               "The programmed correct corner changes within the place-learning export. Therefore a single session-wide learning slope is not interpreted as acquisition or reversal until the intended schedule is confirmed.", ""]
+    protocol_diagnosis = config.get("protocol_diagnosis", [
+        "The intended protocol was ordinary place reversal: maintain one correct corner during acquisition, switch once to the diagonally opposite corner, and keep that new corner active while the animal relearns.",
+        "The controller-recorded targets must be used to determine what was actually executed. Any mismatch from the written schedule is reported as a protocol deviation rather than silently relabelled.",
+    ])
+    report += ["## Protocol diagnosis", ""]
+    for paragraph in protocol_diagnosis:
+        report += [paragraph, ""]
+    if config.get("interim_findings"):
+        report += ["## Interim findings", ""]
+        for paragraph in config["interim_findings"]:
+            report += [paragraph, ""]
+    interpretation_status = config.get("interpretation_status", [
+        "This is a descriptive screening report. Treatment identity, light/dark schedule, exact phase-switch timestamps, reward contingencies, and planned stopping criteria require confirmation before inferential analysis.",
+    ])
+    report += ["## Interpretation status", ""]
+    for paragraph in interpretation_status:
+        report += [paragraph, ""]
     report += ["## Analysis provenance", "",
                "- Session inventory, visit counts, nosepoke counts, corner use and hardware-event summaries are direct quality-control views of the exported tables.",
                "- Individual/cohort learning curves, visit blocks, terminal accuracy, trials-to-criterion, error decomposition and activity–accuracy separation implement the outcomes pre-specified in `projects/intellicage/plan.md` §8.",

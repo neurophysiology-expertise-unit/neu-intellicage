@@ -32,6 +32,42 @@ def qc(session: Session, output: Path) -> None:
         events.to_csv(output / "hardware_event_counts.csv", index=False)
 
 
+def nosepoke_acquisition(session: Session, output: Path) -> None:
+    """Plot daily acquisition of nose-poking for each animal.
+
+    The primary outcome is the proportion of corner visits containing at least
+    one nose-poke. This measures whether the animal initiated the operant
+    response without allowing repeated pokes during one visit to dominate the
+    learning curve. Nose-pokes per visit are retained as a secondary column in
+    the machine-readable table.
+    """
+    if session.nosepokes.empty:
+        return
+    output.mkdir(parents=True, exist_ok=True)
+    visits = add_time_fields(session.visits)
+    poke_counts = session.nosepokes.groupby("VisitID").size().rename("nosepokes")
+    visits = visits.join(poke_counts, on="VisitID")
+    visits["nosepokes"] = visits["nosepokes"].fillna(0).astype(int)
+    visits["visit_with_nosepoke"] = visits["nosepokes"].gt(0)
+    daily = visits.groupby(["AnimalName", "GroupName", "date"], dropna=False).agg(
+        visits=("VisitID", "size"),
+        visits_with_nosepoke=("visit_with_nosepoke", "sum"),
+        total_nosepokes=("nosepokes", "sum"),
+        proportion_visits_with_nosepoke=("visit_with_nosepoke", "mean"),
+        nosepokes_per_visit=("nosepokes", "mean"),
+    ).reset_index()
+    daily.to_csv(output / "daily_nosepoke_acquisition.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for animal, frame in daily.groupby("AnimalName"):
+        ax.plot(pd.to_datetime(frame["date"]), frame["proportion_visits_with_nosepoke"],
+                marker="o", linewidth=1.8, label=animal)
+    ax.set(xlabel="Date", ylabel="Visits containing ≥1 nose-poke",
+           ylim=(0, 1), title="Individual daily nose-poke acquisition")
+    ax.legend(frameon=False, bbox_to_anchor=(1.02, 1), loc="upper left")
+    _save(fig, output / "daily_nosepoke_acquisition.png")
+
+
 def tier1(session: Session, output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     x = add_time_fields(session.visits)
@@ -68,15 +104,28 @@ def tier1(session: Session, output: Path) -> None:
     act = x.groupby(["AnimalName", "date", "hour"]).size().rename("visits").reset_index()
     animals = list(act["AnimalName"].unique())
     fig, axes = plt.subplots(len(animals), 1, figsize=(10, 2.2 * len(animals)), squeeze=False)
-    for ax, animal in zip(axes[:, 0], animals):
+    matrices = {}
+    for animal in animals:
         frame = act[act["AnimalName"].eq(animal)]
-        matrix = frame.pivot(index="date", columns="hour", values="visits").reindex(columns=range(24), fill_value=0)
-        double = np.concatenate([matrix.to_numpy(), np.roll(matrix.to_numpy(), -1, axis=0)], axis=1)
-        ax.imshow(double, aspect="auto", interpolation="nearest", cmap="Greys")
+        matrix = frame.pivot(index="date", columns="hour", values="visits").reindex(
+            columns=range(24), fill_value=0
+        ).fillna(0)
+        matrices[animal] = np.concatenate(
+            [matrix.to_numpy(), np.roll(matrix.to_numpy(), -1, axis=0)], axis=1
+        )
+    common_max = max(float(matrix.max()) for matrix in matrices.values())
+    image = None
+    for ax, animal in zip(axes[:, 0], animals):
+        image = ax.imshow(matrices[animal], aspect="auto", interpolation="nearest",
+                          cmap="Greys", vmin=0, vmax=max(1, common_max))
         ax.set(ylabel=animal, xticks=[0, 12, 24, 36, 47], xticklabels=["0", "12", "24", "36", "48"])
     axes[-1, 0].set_xlabel("Zeitgeber/clock hour (double plotted)")
     fig.suptitle("Individual activity actograms")
-    _save(fig, output / "actograms.png")
+    colorbar = fig.colorbar(image, ax=axes[:, 0].tolist(), pad=.02, fraction=.025)
+    colorbar.set_label("Visits per hour")
+    fig.subplots_adjust(left=.10, right=.87, top=.92, bottom=.10, hspace=.35)
+    fig.savefig(output / "actograms.png", dpi=180)
+    plt.close(fig)
     entropy = corner_entropy(x); entropy.to_csv(output / "corner_entropy.csv", index=False)
     circadian_metrics(x).to_csv(output / "circadian_metrics.csv", index=False)
     ivis = []
