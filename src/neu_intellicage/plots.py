@@ -114,15 +114,25 @@ def tier2(session: Session, output: Path, block_size: int = 100) -> None:
     ax.legend(frameon=False); _save(fig, output / "visit_block_learning.png")
     criterion = trials_to_criterion(blocks, block_size=block_size)
     criterion.to_csv(output / "trials_to_criterion.csv", index=False)
-    fig, ax = plt.subplots(figsize=(5, 4))
+    fig, ax = plt.subplots(figsize=(6, 4))
     valid = criterion.dropna(subset=["trials_to_criterion"])
-    ax.scatter(np.zeros(len(valid)), valid["trials_to_criterion"])
-    ax.set(xticks=[0], xticklabels=["Cohort"], ylabel="Trials to criterion", title="Criterion: ≥50% for two blocks")
+    positions = np.arange(len(criterion))
+    valid_positions = positions[criterion["trials_to_criterion"].notna().to_numpy()]
+    ax.scatter(valid_positions, valid["trials_to_criterion"],
+               c=[f"C{i}" for i in valid_positions], s=55)
+    for position, row in criterion[criterion["trials_to_criterion"].isna()].iterrows():
+        ax.text(position, .04, "not reached", rotation=90, ha="center", va="bottom",
+                transform=ax.get_xaxis_transform(), fontsize=8, color="0.4")
+    ax.set(xticks=positions, xticklabels=criterion["AnimalName"], ylabel="Trials to criterion",
+           xlim=(-.5, len(criterion) - .5), title="Criterion: ≥50% for two blocks")
     _save(fig, output / "trials_to_criterion.png")
     terminal = blocks.groupby("AnimalName").tail(1); terminal.to_csv(output / "terminal_accuracy.csv", index=False)
-    fig, ax = plt.subplots(figsize=(5, 4))
-    ax.scatter(np.zeros(len(terminal)), terminal["accuracy"])
-    ax.axhline(.25, ls="--", color="0.4"); ax.set(xticks=[0], xticklabels=["Terminal block"], ylabel="Correct-place proportion", ylim=(0, 1), title="Terminal accuracy by mouse")
+    fig, ax = plt.subplots(figsize=(6, 4))
+    positions = np.arange(len(terminal))
+    ax.scatter(positions, terminal["accuracy"], c=[f"C{i}" for i in positions], s=60)
+    ax.axhline(.25, ls="--", color="0.4")
+    ax.set(xticks=positions, xticklabels=terminal["AnimalName"], ylabel="Correct-place proportion",
+           xlim=(-.5, len(terminal) - .5), ylim=(0, 1), title="Terminal 100-visit block by mouse")
     _save(fig, output / "terminal_accuracy.png")
     x = add_time_fields(session.visits)
     errors = x.groupby(["AnimalName", "date"]).agg(place_error_rate=("PlaceError", "mean"), visits=("VisitID", "size"), accuracy=("correct", "mean")).reset_index()
