@@ -26,6 +26,7 @@ neu-intellicage qc '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/qc
 neu-intellicage tier1 '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/tier1
 neu-intellicage tier2 '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/tier2
 neu-intellicage all '/path/to/verstreken/Sessions' --session '2026-07-13 13.13.43' --output outputs
+neu-intellicage experiment-report experiment.json --output /path/to/project/analysis/experiments/name
 ```
 
 The QC command writes visit counts per animal/day and hardware-event counts.
@@ -53,3 +54,7 @@ Do not add IntelliCage exports to this repository. Generated tables may contain
 transponder tags; review them before sharing. Each analysis command writes a
 `provenance.json` file with input path, timestamps, file hashes, package version,
 and analysis parameters.
+
+Experiment reports use a JSON configuration to define stable experiment and
+session folders. Session stage labels belong in that explicit configuration;
+the software does not guess protocol meaning from filenames.

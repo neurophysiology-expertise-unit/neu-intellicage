@@ -1,6 +1,7 @@
 import pandas as pd
 
 from neu_intellicage.metrics import daily_learning, visit_block_learning
+from neu_intellicage.report import _target_by_day
 
 
 def visits():
@@ -22,3 +23,11 @@ def test_visit_blocks_are_per_animal():
     result = visit_block_learning(visits(), block_size=2)
     assert result[result.AnimalName.eq("A")]["accuracy"].tolist() == [0.5, 1.0]
     assert result[result.AnimalName.eq("B")]["accuracy"].tolist() == [0.0]
+
+
+def test_target_corner_comes_from_positive_condition():
+    frame = visits()
+    frame["CornerCondition"] = [-1, 1, 1, -1, -1, 1]
+    result = _target_by_day(frame)
+    animal_a = result[result.AnimalName.eq("A")]
+    assert animal_a["target_corner"].tolist() == [2, 1]

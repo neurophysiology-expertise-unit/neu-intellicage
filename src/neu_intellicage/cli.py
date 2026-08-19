@@ -7,6 +7,7 @@ from .inventory import build_inventory
 from .io import load_session
 from .plots import qc, tier1, tier2
 from .provenance import write_provenance
+from .report import build_experiment_report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -17,11 +18,14 @@ def parser() -> argparse.ArgumentParser:
         cmd = sub.add_parser(name); cmd.add_argument("session"); cmd.add_argument("--output", required=True)
         if name == "tier2": cmd.add_argument("--block-size", type=int, default=100)
     all_cmd = sub.add_parser("all"); all_cmd.add_argument("sessions"); all_cmd.add_argument("--session", required=True); all_cmd.add_argument("--output", required=True); all_cmd.add_argument("--block-size", type=int, default=100)
+    report = sub.add_parser("experiment-report"); report.add_argument("config"); report.add_argument("--output", required=True)
     return p
 
 
 def main() -> None:
     args = parser().parse_args()
+    if args.command == "experiment-report":
+        print(build_experiment_report(args.config, args.output)); return
     if args.command == "inventory":
         output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
         build_inventory(args.sessions).to_csv(output, index=False); return
