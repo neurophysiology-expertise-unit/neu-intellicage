@@ -120,8 +120,40 @@ def _group_comparison(config: dict, sessions: dict, output: Path) -> pd.DataFram
     values = values.sort_values("AnimalName")
     values.to_csv(output / "group_measures_by_animal.csv", index=False)
     table = compare_many(values, [spec["name"] for spec in specs], groups)
+    codes = {spec["name"]: f"M{number}" for number, spec in enumerate(specs, start=1)}
+    table.insert(0, "code", table["measure"].map(codes))
     table.to_csv(output / "group_comparison.csv", index=False)
     return table
+
+
+_MEASURE_PHRASING = {
+    "nosepoke_probability": "proportion of corner visits containing at least one nose-poke",
+    "programmed_target_accuracy": "proportion of conditioned visits made to the controller's target",
+    "daily_accuracy_slope": "OLS slope of daily target accuracy, percentage points per day",
+    "preference_shift": "visit proportion at the new target minus the old target",
+}
+
+
+def _describe_dates(dates: list[str] | None) -> str:
+    """Render a date list as a compact window, collapsing a contiguous run."""
+    if not dates:
+        return "whole session"
+    stamps = sorted(pd.Timestamp(d) for d in dates)
+    contiguous = all((b - a).days == 1 for a, b in zip(stamps, stamps[1:]))
+    if len(stamps) == 1:
+        return stamps[0].strftime("%-d %b %Y")
+    if contiguous:
+        return f"{stamps[0].strftime('%-d')}-{stamps[-1].strftime('%-d %b %Y')}"
+    return ", ".join(stamp.strftime("%-d %b") for stamp in stamps)
+
+
+def _describe_measure(spec: dict, session_codes: dict) -> str:
+    """One sentence naming what a measure is and over which window."""
+    if spec.get("label"):
+        return spec["label"]
+    phrase = _MEASURE_PHRASING.get(spec["kind"], spec["kind"].replace("_", " "))
+    where = session_codes.get(spec["session"], spec["session"])
+    return f"{phrase}, {_describe_dates(spec.get('dates'))} ({where})"
 
 
 def _session_overview(session, output: Path) -> dict:
@@ -272,9 +304,13 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     report = [f"# {config['title']}", "", config.get("scope_note", ""), "",
               "## Session inventory", "",
-              "Stage labels below are provisional metadata supplied in the experiment configuration. They are not inferred treatment effects.", "",
-              "| Session | Provisional stage | Animals | Visits | Nosepokes | Conditioned visits |", "|---|---|---:|---:|---:|---:|"]
+              "Sessions are referred to by the short codes S1, S2, ... throughout this report; each code is expanded under the table. Stage labels are provisional metadata supplied in the experiment configuration. They are not inferred treatment effects.", "",
+              "| | Animals | Visits | Nosepokes | Conditioned visits |", "|:--|---:|---:|---:|---:|"]
     summaries, stamped, loaded = [], [], {}
+    # Long identifiers in the first column push the numeric columns off their
+    # own width in the PDF, so the table carries a code and the identifier and
+    # stage are expanded in a legend directly beneath it.
+    codes = {item["id"]: f"S{number}" for number, item in enumerate(config["sessions"], start=1)}
     for item in config["sessions"]:
         session = load_session(item["path"])
         excluded = item.get("exclude_animals", [])
@@ -303,12 +339,17 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
         write_provenance(session_output, session.path, {"stage": item["stage"], "block_size": config.get("block_size", 100), "excluded_animals": excluded})
         stamped.append({"id": item["id"], "source": str(session.path),
                         "provenance": f"sessions/{item['id']}/provenance.json"})
-        report.append(f"| {item['id']} | {item['stage']} | {summary['animals']} | {summary['visits']:,} | {summary['nosepokes']:,} | {summary['conditioned_visits']:,} |")
+        report.append(f"| **{codes[item['id']]}** | {summary['animals']} | {summary['visits']:,} | "
+                      f"{summary['nosepokes']:,} | {summary['conditioned_visits']:,} |")
     pd.DataFrame(summaries).to_csv(output / "session_summary.csv", index=False)
-    report += ["", "## Quick-look figures", ""]
+    report += [""]
+    for item in config["sessions"]:
+        report.append(f"**{codes[item['id']]}** — `{item['id']}`. {item['stage']}.")
+        report.append("")
+    report += ["## Quick-look figures", ""]
     for item in config["sessions"]:
         sid = item["id"]
-        report += [f"### {sid} — {item['stage']}", "", item.get("note", ""), "",
+        report += [f"### {codes[sid]} — {sid}", "", f"*{item['stage']}.* " + item.get("note", ""), "",
                    f"![Session overview](sessions/{sid}/session_overview.png)", "",
                    "*Session overview.* Four quality-control views: total visits and nosepokes per animal, the distribution of visits across the four physical corners, and visits per calendar day. Use it to identify unusually inactive animals, corner bias, incomplete days, or gross recording problems; it does not by itself measure learning.", "",
                    f"![Visits per animal and day](sessions/{sid}/qc/visits_per_animal_day.png)", "",
@@ -367,23 +408,36 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
                "- No values were copied from the earlier AI reports. Plotted values were recomputed from `Visits.txt`, `Nosepokes.txt`, `Animals.txt`, and `HardwareEvents.txt`. Where the earlier narrative conflicts with those tables, the raw export controls the current report.", ""]
     contrasts = _group_comparison(config, loaded, output)
     if not contrasts.empty:
+        # Measure names are long enough to crowd the numeric columns, so the
+        # table uses M1, M2, ... and every code is expanded beneath it.
+        measure_codes = {spec["name"]: f"M{number}"
+                         for number, spec in enumerate(config["group_measures"], start=1)}
+        group_a, group_b = contrasts.iloc[0]["group_a"], contrasts.iloc[0]["group_b"]
         report += ["## Between-group comparison", "",
-                   "Each row is one pre-declared measure with the MOUSE as the experimental unit. "
+                   "Each row is one pre-declared measure with the MOUSE as the experimental unit; "
+                   "the codes M1, M2, ... are expanded under the table. "
                    "`p` is an exact two-sided label permutation over all group assignments; the CI is a "
-                   "percentile bootstrap on the difference in means. `min_attainable_p` is the smallest "
+                   "percentile bootstrap on the difference in means. `min p` is the smallest "
                    "p-value this design can produce, so a p above it is not evidence of no difference — "
                    "it is a study too small to resolve one. Values behind this table are in "
                    "`group_measures_by_animal.csv` and `group_comparison.csv`.", "",
-                   "| Measure | " + " | ".join(contrasts.iloc[0][["group_a", "group_b"]]) +
-                   " | Difference | 95% CI | p (exact) | min p |",
-                   "|---|---:|---:|---:|:---:|---:|---:|"]
+                   f"| | {group_a} | {group_b} | Difference | 95% CI | p | min p |",
+                   "|:--|---:|---:|---:|:---:|---:|---:|"]
         for _, row in contrasts.iterrows():
             report.append(
-                f"| {row['measure']} | {row['mean_a']:.3f} (n={int(row['n_a'])}) | "
-                f"{row['mean_b']:.3f} (n={int(row['n_b'])}) | {row['difference']:+.3f} | "
+                f"| **{measure_codes[row['measure']]}** | {row['mean_a']:.3f} | "
+                f"{row['mean_b']:.3f} | {row['difference']:+.3f} | "
                 f"[{row['ci_low']:+.3f}, {row['ci_high']:+.3f}] | {row['p_value']:.3f} | "
                 f"{row['min_attainable_p']:.3f} |")
-        report += ["", "Every confidence interval above includes differences large enough to matter "
+        first = contrasts.iloc[0]
+        report += ["",
+                   f"Group means are over n={int(first['n_a'])} {group_a} and "
+                   f"n={int(first['n_b'])} {group_b} mice for every row.", ""]
+        for spec in config["group_measures"]:
+            report.append(f"**{measure_codes[spec['name']]}** — {_describe_measure(spec, codes)}. "
+                          f"Column name in the CSVs: `{spec['name']}`.")
+            report.append("")
+        report += ["Every confidence interval above includes differences large enough to matter "
                    "biologically, so these data do not establish equivalence between the groups.", ""]
     write_experiment_provenance(output, Path(config_path), stamped)
     # No markdown horizontal rule here: pandoc renders "---" as \rule{}{\linethickness},
