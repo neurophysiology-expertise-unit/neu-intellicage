@@ -35,15 +35,34 @@ def qc(session: Session, output: Path) -> None:
 def tier1(session: Session, output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     x = add_time_fields(session.visits)
-    hourly = x.groupby(["AnimalName", "hour"]).size().rename("visits").reset_index()
+    # First calculate a rate for every actually observed animal-hour bin,
+    # including bins with zero visits. Summing by clock hour overweights longer
+    # sessions, while an incomplete pivot produces undefined SEM bands.
+    hourly_bins = []
+    for animal, frame in x.groupby("AnimalName"):
+        start = frame["Start"].min().floor("h")
+        end = frame["Start"].max().ceil("h")
+        index = pd.date_range(start, end, freq="h", inclusive="left")
+        counts = frame.set_index("Start").resample("h").size().reindex(index, fill_value=0)
+        hourly_bins.append(pd.DataFrame({"AnimalName": animal, "time": index,
+                                         "hour": index.hour, "visits": counts.to_numpy()}))
+    hourly_bins = pd.concat(hourly_bins, ignore_index=True)
+    hourly_bins.to_csv(output / "hourly_rate_by_animal.csv", index=False)
+    hourly = hourly_bins.groupby(["AnimalName", "hour"])["visits"].mean().rename("visits_per_hour").reset_index()
     hourly.to_csv(output / "hourly_visits.csv", index=False)
     fig, ax = plt.subplots(figsize=(8, 4))
-    pivot = hourly.pivot(index="hour", columns="AnimalName", values="visits").reindex(range(24), fill_value=0)
+    pivot = hourly.pivot(index="hour", columns="AnimalName", values="visits_per_hour").reindex(range(24))
     mean, sem = pivot.mean(axis=1), pivot.sem(axis=1)
-    ax.plot(mean.index, mean, color="black")
-    ax.fill_between(mean.index, mean-sem, mean+sem, color="black", alpha=.2)
-    ax.axvspan(19, 24, color="0.9"); ax.axvspan(0, 7, color="0.9")
-    ax.set(xlabel="Hour of day", ylabel="Visits (mean ± SEM)", title="Hourly activity")
+    ax.axvspan(19, 23, color="0.94", zorder=0, label="Nominal dark phase")
+    ax.axvspan(0, 7, color="0.94", zorder=0)
+    lower = (mean - sem).clip(lower=0)
+    upper = mean + sem
+    ax.fill_between(mean.index, lower, upper, color="tab:blue", alpha=.25,
+                    edgecolor="tab:blue", linewidth=.8, zorder=2, label="SEM")
+    ax.plot(mean.index, mean, color="tab:blue", linewidth=2, zorder=3, label="Animal mean")
+    ax.set(xlim=(0, 23), ylim=(0, max(1, float(upper.max()) * 1.08)),
+           xlabel="Hour of day", ylabel="Visits/hour (animal mean ± SEM)", title="Hourly activity")
+    ax.legend(frameon=False, ncol=3, fontsize=8)
     _save(fig, output / "hourly_activity.png")
     # Double-plotted actogram: each row shows one day followed by the next.
     act = x.groupby(["AnimalName", "date", "hour"]).size().rename("visits").reset_index()
