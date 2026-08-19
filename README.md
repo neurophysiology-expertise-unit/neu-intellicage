@@ -27,7 +27,12 @@ neu-intellicage tier1 '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/t
 neu-intellicage tier2 '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/tier2
 neu-intellicage all '/path/to/verstreken/Sessions' --session '2026-07-13 13.13.43' --output outputs
 neu-intellicage experiment-report experiment.json --output /path/to/project/analysis/experiments/name
+scripts/render_report.sh /path/to/project/analysis/experiments/name
 ```
+
+`render_report.sh` builds `report.html` and `report.pdf` from the generated
+`report.md` with pandoc, so a delivered PDF can always be rebuilt from the
+committed inputs.
 
 The QC command writes visit counts per animal/day and hardware-event counts.
 Tier 1 writes hourly activity, inter-visit intervals, corner-use entropy, and
@@ -39,8 +44,15 @@ also saved as CSV.
 ## Interpretation safeguards
 
 - Animal identity is keyed by transponder tag and joined to `Animals.txt`.
-- `PlaceError == 0` is treated as a correct-place visit; this is reported
-  explicitly in outputs.
+- Accuracy is defined only over **conditioned** visits (`CornerCondition != 0`).
+  IntelliCage sets `PlaceError == 0` both for a correct visit and for every visit
+  made while no corner was rewarded, so scoring `PlaceError == 0` alone reports an
+  accuracy of 1.000 for habituation and nose-poke sessions. Tables carry
+  `conditioned_visits` as the accuracy denominator and leave `accuracy` empty when
+  it is zero.
+- Terminal accuracy uses each mouse's last **complete** block. A trailing partial
+  block of a few visits is reported as such, never scored.
+- Trials to criterion counts only complete, adjacent blocks.
 - A 25% line is only a geometric four-corner chance reference, not a statistical
   test of learning.
 - Group labels are read as recorded. The July validation session labels all four
@@ -57,4 +69,18 @@ and analysis parameters.
 
 Experiment reports use a JSON configuration to define stable experiment and
 session folders. Session stage labels belong in that explicit configuration;
-the software does not guess protocol meaning from filenames.
+the software does not guess protocol meaning from filenames. The experiment
+directory also gets its own `provenance.json` recording the configuration file
+and its hash, so a report can always be traced to the configuration that made it.
+
+### Between-group statistics
+
+Add `groups` and `group_measures` to `experiment.json` and the report gains a
+comparison table computed from code rather than typed into prose. Each measure
+yields one value per mouse; the test is an exact two-sided label permutation and
+every contrast carries a bootstrap confidence interval on the difference,
+whatever the p-value. The table also prints `min_attainable_p`: with four mice
+per group the smallest possible p-value is 0.029, so a larger p means the design
+could not resolve an effect, not that there is none. Measure kinds are
+`nosepoke_probability`, `programmed_target_accuracy`, `daily_accuracy_slope`, and
+`preference_shift`; each takes an explicit list of `dates`.

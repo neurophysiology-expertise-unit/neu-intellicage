@@ -45,7 +45,9 @@ def load_session(path: str | Path) -> Session:
     visits = _dates(_read(cage / "Visits.txt"), ("Start", "End"))
     nosepokes = _dates(_read(cage / "Nosepokes.txt", required=False), ("Start", "End"))
     hardware = _dates(_read(cage / "HardwareEvents.txt", required=False), ("DateTime",))
-    required = {"VisitID", "AnimalTag", "Start", "Corner", "PlaceError"}
+    # Every column the analysis code reads unconditionally, so a truncated
+    # export fails here with the column named rather than deep inside plotting.
+    required = {"VisitID", "AnimalTag", "Start", "End", "Corner", "CornerCondition", "PlaceError"}
     missing = required.difference(visits.columns)
     if missing:
         raise ValueError(f"Visits.txt lacks required columns: {sorted(missing)}")

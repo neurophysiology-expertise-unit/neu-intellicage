@@ -5,10 +5,25 @@ import pandas as pd
 
 
 def add_time_fields(visits: pd.DataFrame) -> pd.DataFrame:
+    """Add date/hour fields and the conditioned-visit correctness flags.
+
+    IntelliCage sets ``PlaceError == 0`` both for a visit to the rewarded corner
+    and for every visit made while no corner condition is active. Scoring
+    accuracy as ``PlaceError == 0`` therefore reports 1.0 for habituation and
+    nose-poke sessions, where no corner was ever rewarded. ``conditioned``
+    marks the visits for which a target existed (``CornerCondition != 0``) and
+    ``correct`` is defined only on those visits, so accuracy means
+    "of the visits that could be right, how many were" in every session.
+    """
     out = visits.copy()
     out["date"] = out["Start"].dt.date
     out["hour"] = out["Start"].dt.hour
-    out["correct"] = out["PlaceError"].eq(0)
+    if "CornerCondition" in out:
+        out["conditioned"] = out["CornerCondition"].ne(0).fillna(False).astype(bool)
+    else:
+        out["conditioned"] = True
+    correct = out["PlaceError"].eq(0)
+    out["correct"] = correct.where(out["conditioned"], other=pd.NA).astype("boolean")
     return out
 
 
@@ -40,14 +55,33 @@ def circadian_metrics(visits: pd.DataFrame, bin_hours: int = 1) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def daily_learning(visits: pd.DataFrame) -> pd.DataFrame:
+    """Daily visit counts and accuracy over conditioned visits only.
+
+    ``visits`` counts every visit (the activity measure); ``conditioned_visits``
+    is the accuracy denominator. ``accuracy`` is NA on animal-days with no
+    conditioned visit rather than a spurious 1.0.
+    """
     x = add_time_fields(visits)
-    return x.groupby(["AnimalName", "GroupName", "date"], dropna=False).agg(
-        visits=("VisitID", "size"), correct=("correct", "sum"), accuracy=("correct", "mean")
+    out = x.groupby(["AnimalName", "GroupName", "date"], dropna=False).agg(
+        visits=("VisitID", "size"), conditioned_visits=("conditioned", "sum"),
+        correct=("correct", "sum"), accuracy=("correct", "mean"),
     ).reset_index()
+    out["accuracy"] = out["accuracy"].where(out["conditioned_visits"].gt(0))
+    return out
 
 
 def visit_block_learning(visits: pd.DataFrame, block_size: int = 100) -> pd.DataFrame:
+    """Accuracy in consecutive blocks of ``block_size`` conditioned visits.
+
+    Blocks are numbered over conditioned visits, so a block is a fixed amount of
+    evidence about choice rather than a fixed amount of time in the cage. The
+    final block of a session is usually incomplete; ``visits`` records its real
+    size so downstream code can require a minimum.
+    """
     x = add_time_fields(visits).sort_values(["AnimalName", "Start"])
+    x = x[x["conditioned"]]
+    if x.empty:
+        return pd.DataFrame(columns=["AnimalName", "GroupName", "block", "visits", "accuracy"])
     x["visit_number"] = x.groupby("AnimalName").cumcount() + 1
     x["block"] = (x["visit_number"] - 1) // block_size + 1
     return x.groupby(["AnimalName", "GroupName", "block"], dropna=False).agg(
@@ -55,10 +89,29 @@ def visit_block_learning(visits: pd.DataFrame, block_size: int = 100) -> pd.Data
     ).reset_index()
 
 
-def trials_to_criterion(blocks: pd.DataFrame, threshold: float = 0.5, consecutive: int = 2, block_size: int = 100) -> pd.DataFrame:
+def trials_to_criterion(blocks: pd.DataFrame, threshold: float = 0.5, consecutive: int = 2,
+                        block_size: int = 100, min_block_visits: int | None = None) -> pd.DataFrame:
+    """Conditioned visits needed for ``consecutive`` blocks at or above ``threshold``.
+
+    Only complete blocks count towards the criterion: a 3-visit trailing block
+    that happens to read 0.67 is not evidence of learning. ``min_block_visits``
+    defaults to the full ``block_size``. Blocks must also be adjacent in block
+    number, so a gap cannot be mistaken for a run.
+    """
+    floor = block_size if min_block_visits is None else min_block_visits
     rows = []
     for animal, frame in blocks.sort_values("block").groupby("AnimalName"):
-        hit = frame["accuracy"].ge(threshold).rolling(consecutive).sum().eq(consecutive)
-        trial = int(frame.loc[hit.idxmax(), "block"] * block_size) if hit.any() else pd.NA
-        rows.append({"AnimalName": animal, "trials_to_criterion": trial, "threshold": threshold, "consecutive_blocks": consecutive})
+        frame = frame.reset_index(drop=True)
+        qualifies = (frame["accuracy"].ge(threshold) & frame["visits"].ge(floor)).to_numpy()
+        numbers = frame["block"].to_numpy()
+        run, trial, previous = 0, pd.NA, None
+        for position, block in enumerate(numbers):
+            adjacent = previous is not None and block == previous + 1
+            run = (run + 1 if adjacent else 1) if qualifies[position] else 0
+            previous = block
+            if run >= consecutive:
+                trial = int(block * block_size)
+                break
+        rows.append({"AnimalName": animal, "trials_to_criterion": trial, "threshold": threshold,
+                     "consecutive_blocks": consecutive, "min_block_visits": floor})
     return pd.DataFrame(rows)

@@ -89,7 +89,9 @@ def tier1(session: Session, output: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 4))
     pivot = hourly.pivot(index="hour", columns="AnimalName", values="visits_per_hour").reindex(range(24))
     mean, sem = pivot.mean(axis=1), pivot.sem(axis=1)
-    ax.axvspan(19, 23, color="0.94", zorder=0, label="Nominal dark phase")
+    # 19:00-07:00 wraps midnight, so it needs both spans; the evening one must
+    # run to 24 or the 23:00 bin is silently left outside the shaded dark phase.
+    ax.axvspan(19, 24, color="0.94", zorder=0, label="Nominal dark phase")
     ax.axvspan(0, 7, color="0.94", zorder=0)
     lower = (mean - sem).clip(lower=0)
     upper = mean + sem
@@ -105,20 +107,27 @@ def tier1(session: Session, output: Path) -> None:
     animals = list(act["AnimalName"].unique())
     fig, axes = plt.subplots(len(animals), 1, figsize=(10, 2.2 * len(animals)), squeeze=False)
     matrices = {}
+    # Rows must be calendar-continuous: a day with no visits still gets a blank
+    # row, otherwise adjacent rows are not adjacent days and the actogram lies
+    # about phase. The right half is the FOLLOWING day, so the last row's right
+    # half is blank rather than wrapping around to the first day.
+    all_dates = pd.date_range(min(act["date"]), max(act["date"]), freq="D").date
     for animal in animals:
         frame = act[act["AnimalName"].eq(animal)]
         matrix = frame.pivot(index="date", columns="hour", values="visits").reindex(
-            columns=range(24), fill_value=0
-        ).fillna(0)
-        matrices[animal] = np.concatenate(
-            [matrix.to_numpy(), np.roll(matrix.to_numpy(), -1, axis=0)], axis=1
-        )
+            index=all_dates, columns=range(24), fill_value=0
+        ).fillna(0).to_numpy()
+        following = np.vstack([matrix[1:], np.zeros((1, 24))])
+        matrices[animal] = np.concatenate([matrix, following], axis=1)
+    date_labels = [str(d) for d in all_dates]
     common_max = max(float(matrix.max()) for matrix in matrices.values())
     image = None
     for ax, animal in zip(axes[:, 0], animals):
         image = ax.imshow(matrices[animal], aspect="auto", interpolation="nearest",
                           cmap="Greys", vmin=0, vmax=max(1, common_max))
-        ax.set(ylabel=animal, xticks=[0, 12, 24, 36, 47], xticklabels=["0", "12", "24", "36", "48"])
+        ax.set(ylabel=animal, xticks=[0, 12, 24, 36, 47], xticklabels=["0", "12", "24", "36", "48"],
+               yticks=range(len(date_labels)), yticklabels=date_labels)
+        ax.tick_params(axis="y", labelsize=7)
     axes[-1, 0].set_xlabel("Zeitgeber/clock hour (double plotted)")
     fig.suptitle("Individual activity actograms")
     colorbar = fig.colorbar(image, ax=axes[:, 0].tolist(), pad=.02, fraction=.025)
@@ -141,7 +150,8 @@ def tier1(session: Session, output: Path) -> None:
     _save(fig, output / "inter_visit_intervals.png")
 
 
-def tier2(session: Session, output: Path, block_size: int = 100) -> None:
+def tier2(session: Session, output: Path, block_size: int = 100,
+          threshold: float = 0.5, consecutive: int = 2) -> None:
     output.mkdir(parents=True, exist_ok=True)
     daily = daily_learning(session.visits); daily.to_csv(output / "daily_learning.csv", index=False)
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -161,7 +171,7 @@ def tier2(session: Session, output: Path, block_size: int = 100) -> None:
         ax.plot(frame["block"] * block_size, frame["accuracy"], marker="o", ms=3, label=animal)
     ax.axhline(.25, ls="--", color="0.4"); ax.set(xlabel="Visits completed", ylabel="Correct-place proportion", ylim=(0, 1), title="Visit-block acquisition")
     ax.legend(frameon=False); _save(fig, output / "visit_block_learning.png")
-    criterion = trials_to_criterion(blocks, block_size=block_size)
+    criterion = trials_to_criterion(blocks, threshold=threshold, consecutive=consecutive, block_size=block_size)
     criterion.to_csv(output / "trials_to_criterion.csv", index=False)
     fig, ax = plt.subplots(figsize=(6, 4))
     valid = criterion.dropna(subset=["trials_to_criterion"])
@@ -172,19 +182,53 @@ def tier2(session: Session, output: Path, block_size: int = 100) -> None:
     for position, row in criterion[criterion["trials_to_criterion"].isna()].iterrows():
         ax.text(position, .04, "not reached", rotation=90, ha="center", va="bottom",
                 transform=ax.get_xaxis_transform(), fontsize=8, color="0.4")
-    ax.set(xticks=positions, xticklabels=criterion["AnimalName"], ylabel="Trials to criterion",
-           xlim=(-.5, len(criterion) - .5), title="Criterion: ≥50% for two blocks")
+    ax.set(xticks=positions, xticklabels=criterion["AnimalName"], ylabel="Conditioned visits to criterion",
+           xlim=(-.5, len(criterion) - .5),
+           title=f"Criterion: ≥{threshold:.0%} for {consecutive} complete {block_size}-visit blocks")
+    ax.tick_params(axis="x", rotation=20)
     _save(fig, output / "trials_to_criterion.png")
-    terminal = blocks.groupby("AnimalName").tail(1); terminal.to_csv(output / "terminal_accuracy.csv", index=False)
-    fig, ax = plt.subplots(figsize=(6, 4))
+    # Terminal accuracy must come from a COMPLETE block. The trailing block of a
+    # session is whatever visits were left over -- 3 or 8 visits is common -- and
+    # plotting that beside a full block invites reading binomial noise as the
+    # best-performing mouse. Animals without a complete block are reported as
+    # such instead of being given a number.
+    complete = blocks[blocks["visits"].ge(block_size)]
+    terminal = complete.groupby("AnimalName").tail(1)
+    dropped = sorted(set(blocks["AnimalName"]) - set(terminal["AnimalName"]))
+    if dropped:
+        absent = blocks.groupby("AnimalName").tail(1)
+        absent = absent[absent["AnimalName"].isin(dropped)].copy()
+        absent["accuracy"] = np.nan
+        terminal = pd.concat([terminal, absent]).sort_values("AnimalName")
+    terminal = terminal.rename(columns={"visits": "block_visits"})
+    terminal["complete_block"] = terminal["block_visits"].ge(block_size)
+    terminal.to_csv(output / "terminal_accuracy.csv", index=False)
+    fig, ax = plt.subplots(figsize=(6.5, 4))
     positions = np.arange(len(terminal))
     ax.scatter(positions, terminal["accuracy"], c=[f"C{i}" for i in positions], s=60)
+    for position, (_, row) in zip(positions, terminal.iterrows()):
+        if row["complete_block"]:
+            ax.annotate(f"n={int(row['block_visits'])}", (position, row["accuracy"]),
+                        textcoords="offset points", xytext=(0, 8), ha="center", fontsize=7, color="0.35")
+        else:
+            ax.text(position, .04, f"no complete block (n={int(row['block_visits'])})", rotation=90,
+                    ha="center", va="bottom", transform=ax.get_xaxis_transform(), fontsize=7, color="0.4")
     ax.axhline(.25, ls="--", color="0.4")
     ax.set(xticks=positions, xticklabels=terminal["AnimalName"], ylabel="Correct-place proportion",
-           xlim=(-.5, len(terminal) - .5), ylim=(0, 1), title="Terminal 100-visit block by mouse")
+           xlim=(-.5, len(terminal) - .5), ylim=(0, 1),
+           title=f"Terminal complete {block_size}-visit block by mouse")
+    ax.tick_params(axis="x", rotation=20)
     _save(fig, output / "terminal_accuracy.png")
     x = add_time_fields(session.visits)
-    errors = x.groupby(["AnimalName", "date"]).agg(place_error_rate=("PlaceError", "mean"), visits=("VisitID", "size"), accuracy=("correct", "mean")).reset_index()
+    # PlaceError is 0 on unconditioned visits too, so its raw mean understates the
+    # error rate whenever a session mixes neutral and conditioned visits. Score it
+    # on the same denominator as accuracy.
+    conditioned = x[x["conditioned"]]
+    errors = conditioned.groupby(["AnimalName", "date"]).agg(
+        place_error_rate=("PlaceError", "mean"), visits=("VisitID", "size"),
+        accuracy=("correct", "mean")).reset_index()
+    errors = errors.merge(x.groupby(["AnimalName", "date"]).size().rename("all_visits").reset_index(),
+                          on=["AnimalName", "date"], how="left")
     if "SideError" in session.nosepokes:
         side = session.nosepokes.merge(session.visits[["VisitID", "AnimalName", "Start"]], on="VisitID", suffixes=("", "_visit"))
         side["date"] = side["Start_visit"].dt.date
@@ -200,7 +244,7 @@ def tier2(session: Session, output: Path, block_size: int = 100) -> None:
     ax.legend(frameon=False); _save(fig, output / "error_decomposition.png")
     fig, ax = plt.subplots(figsize=(6, 4))
     for animal, frame in errors.groupby("AnimalName"):
-        ax.scatter(frame["visits"], frame["accuracy"], label=animal)
+        ax.scatter(frame["all_visits"], frame["accuracy"], label=animal)
     ax.axhline(.25, ls="--", color="0.4")
     ax.set(xlabel="Visits per day", ylabel="Correct-place proportion", ylim=(0, 1), title="Activity–accuracy dissociation")
     ax.legend(frameon=False)
