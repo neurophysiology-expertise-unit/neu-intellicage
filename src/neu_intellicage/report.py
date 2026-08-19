@@ -164,11 +164,11 @@ def _programmed_target_analysis(session, output: Path) -> None:
     ax.plot(dates, cohort["current_target_accuracy"], color="black", marker="o", lw=2.5, label="Currently programmed target")
     for date, state in zip(dates, cohort["target_state"]):
         ax.text(date, .97, "A" if state == "acquisition target" else "O", ha="center", va="top", fontsize=8)
-    ax.text(.99, .97, "A = acquisition target; O = opposite target", transform=ax.transAxes,
-            ha="right", va="top", fontsize=8, color="0.35")
     ax.axhline(.25, ls="--", color="0.5"); ax.set(xlabel="Date", ylabel="Visit proportion", ylim=(0, 1),
         title="Performance under the recorded alternating target schedule")
-    ax.legend(frameon=False, ncol=2); fig.tight_layout(); fig.savefig(output / "programmed_target_performance.png", dpi=180); plt.close(fig)
+    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(.5, -.18))
+    fig.tight_layout(); fig.savefig(output / "programmed_target_performance.png", dpi=180,
+                                    bbox_inches="tight"); plt.close(fig)
 
 
 def build_experiment_report(config_path: str | Path, output: str | Path) -> Path:
