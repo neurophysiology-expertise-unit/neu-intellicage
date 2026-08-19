@@ -10,9 +10,10 @@ import pandas as pd
 
 from . import __version__
 from .io import load_session
-from .metrics import add_time_fields, daily_learning
+from .metrics import CHANCE, add_time_fields, boundary_frame, daily_learning
 from .plots import nosepoke_acquisition, qc, tier1, tier2
-from .groups import compare_many
+from .groups import compare_many, scan_profile
+from .profile import MEASURE_BLOCKS, MEASURE_NOTES, animal_profile, contingency_balance
 from .provenance import write_experiment_provenance, write_provenance
 
 
@@ -156,6 +157,71 @@ def _describe_measure(spec: dict, session_codes: dict) -> str:
     return f"{phrase}, {_describe_dates(spec.get('dates'))} ({where})"
 
 
+def _profile_scan(config: dict, sessions: dict, output: Path) -> list[str]:
+    """Behavioural profile scan: many measures, one contrast each, FDR-corrected.
+
+    Reported separately from the pre-declared measures because it is a scan.
+    Its job is to generate hypotheses for the next cohort, not to test one here.
+    """
+    spec = config.get("profile_scan")
+    groups = config.get("groups")
+    if not spec or not groups:
+        return []
+    session = sessions[spec["session"]]
+    profile = animal_profile(session, spec.get("dates"))
+    profile.to_csv(output / "behavioural_profile_by_animal.csv", index=False)
+    table = scan_profile(profile, groups, spec.get("measures"))
+    if table.empty:
+        return []
+    balance = contingency_balance(session, groups)
+    balance.to_csv(output / "profile_contingency_balance.csv", index=False)
+    codes = {m: f"P{i}" for i, m in enumerate(table["measure"], start=1)}
+    table.insert(0, "code", table["measure"].map(codes))
+    table.to_csv(output / "profile_scan.csv", index=False)
+
+    group_a, group_b = table.iloc[0]["group_a"], table.iloc[0]["group_b"]
+    n_a, n_b = int(table.iloc[0]["n_a"]), int(table.iloc[0]["n_b"])
+    floor = float(table.iloc[0]["min_attainable_p"])
+    lines = ["## Behavioural profile scan", "",
+             spec.get("note", ""), "",
+             f"Every measure of the per-animal profile for session `{spec['session']}`, each compared "
+             f"between the two groups by the same exact permutation test and then corrected for "
+             f"testing them all together (Benjamini-Hochberg). Rows are sorted by raw p and keyed "
+             f"P1, P2, ...; the codes are expanded under the table.", ""]
+    if bool(balance["confounded"].any()):
+        fractions = ", ".join(f"{row['group']} {row['conditioned_visit_fraction']:.0%}"
+                              for _, row in balance.iterrows())
+        lines += [f"> **This session cannot support a treatment comparison.** The groups did not "
+                  f"experience the same corner contingency: {fractions} of visits were conditioned. "
+                  f"Any difference below is as consistent with the differing contingency as with "
+                  f"treatment, and must not be reported as a treatment effect.", ""]
+    lines += [f"| | {group_a} | {group_b} | Difference | 95% CI | p | p (BH) |",
+              "|:--|---:|---:|---:|:---:|---:|---:|"]
+    for _, row in table.iterrows():
+        lines.append(f"| **{row['code']}** | {row['mean_a']:.3f} | {row['mean_b']:.3f} | "
+                     f"{row['difference']:+.3f} | [{row['ci_low']:+.3f}, {row['ci_high']:+.3f}] | "
+                     f"{row['p_value']:.3f} | {row['p_adjusted_bh']:.3f} |")
+    tests = len(table)
+    lines += ["",
+              f"Group means are over n={n_a} {group_a} and n={n_b} {group_b} mice. "
+              f"With {n_a} versus {n_b} animals the smallest attainable raw p is {floor:.3f}, so across "
+              f"{tests} measures the smallest attainable BH value is {min(1.0, floor * tests):.2f}: "
+              f"**nothing in this table can reach significance after correction, whatever the data**. "
+              f"That is a property of the sample size, not of these mice. Read the table for the "
+              f"direction and size of differences and for which measures deserve to be pre-specified "
+              f"in a properly powered cohort.", ""]
+    for _, row in table.iterrows():
+        note = MEASURE_NOTES.get(row["measure"], "")
+        block = next((name for name, members in MEASURE_BLOCKS.items()
+                      if row["measure"] in members), "Other")
+        lines.append(f"**{row['code']}** ({block}) — `{row['measure']}`: {note}.")
+        lines.append("")
+    dropped = table["dropped_constant_measures"].iloc[0]
+    if dropped:
+        lines += [f"Measures dropped because they were identical in every animal: `{dropped}`.", ""]
+    return lines
+
+
 def _session_overview(session, output: Path) -> dict:
     x = add_time_fields(session.visits)
     daily = daily_learning(session.visits)
@@ -221,6 +287,12 @@ def _programmed_target_analysis(session, output: Path) -> None:
     corner_daily = corner_daily.merge(targets[["AnimalName", "date", "target_corner"]],
                                       on=["AnimalName", "date"], how="left")
     corner_daily["is_programmed_target"] = corner_daily["Corner"].eq(corner_daily["target_corner"])
+    # The boundary rests on that mouse's visits that day, so a quiet day needs a
+    # much larger preference before it means anything.
+    corner_bounds = boundary_frame(corner_daily["total_visits"])
+    corner_daily["chance_lower"] = corner_bounds["chance_lower"].to_numpy()
+    corner_daily["chance_upper"] = corner_bounds["chance_upper"].to_numpy()
+    corner_daily["above_chance"] = corner_daily["preference"].gt(corner_daily["chance_upper"])
     corner_daily.to_csv(output / "individual_daily_corner_preference.csv", index=False)
 
     colors = {1: "tab:blue", 2: "tab:orange", 3: "tab:green", 4: "tab:red"}
@@ -239,7 +311,10 @@ def _programmed_target_analysis(session, output: Path) -> None:
         ax.scatter(pd.to_datetime(target["date"]), target["preference"], s=105,
                    facecolors="none", edgecolors="black", linewidths=1.5,
                    zorder=5, label="Programmed target")
-        ax.axhline(.25, ls="--", color="0.55", lw=1)
+        edge = frame.drop_duplicates("date").sort_values("date")
+        ax.fill_between(pd.to_datetime(edge["date"]), edge["chance_lower"].fillna(0),
+                        edge["chance_upper"], color="0.75", alpha=.35, zorder=0)
+        ax.axhline(CHANCE, ls=":", color="0.55", lw=1, zorder=1)
         ax.set(title=animal, ylim=(0, 1), ylabel="Daily visit proportion")
         ax.tick_params(axis="x", rotation=30)
     for ax in axes.flat[len(animals):]:
@@ -260,7 +335,11 @@ def _programmed_target_analysis(session, output: Path) -> None:
             for bar, is_target in zip(bars, part["is_programmed_target"].fillna(False)):
                 if is_target:
                     bar.set_edgecolor("black"); bar.set_linewidth(2.2)
-        ax.axhline(.25, ls="--", color="0.45", lw=1)
+        edge = frame.drop_duplicates("date").set_index("date").reindex(dates_for_animal)
+        ax.fill_between(xpos, edge["chance_lower"].fillna(0).to_numpy(),
+                        edge["chance_upper"].to_numpy(), color="0.75", alpha=.35,
+                        step="mid", zorder=0, label="Chance range")
+        ax.axhline(CHANCE, ls=":", color="0.45", lw=1, zorder=1)
         ax.set(xticks=xpos, xticklabels=[str(d)[5:] for d in dates_for_animal], ylim=(0, 1),
                xlabel="Date", ylabel="Visit proportion", title=f"{animal}: daily corner preference")
         ax.legend(frameon=False, ncol=4); fig.tight_layout()
@@ -292,7 +371,8 @@ def _programmed_target_analysis(session, output: Path) -> None:
     ax.plot(dates, cohort["current_target_accuracy"], color="black", marker="o", lw=2.5, label="Currently programmed target")
     for date, state in zip(dates, cohort["target_state"]):
         ax.text(date, .97, "A" if state == "acquisition target" else "O", ha="center", va="top", fontsize=8)
-    ax.axhline(.25, ls="--", color="0.5"); ax.set(xlabel="Date", ylabel="Visit proportion", ylim=(0, 1),
+    ax.axhline(CHANCE, ls=":", color="0.5", label="p = 0.25")
+    ax.set(xlabel="Date", ylabel="Visit proportion", ylim=(0, 1),
         title="Performance under the recorded alternating target schedule")
     ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(.5, -.18))
     fig.tight_layout(); fig.savefig(output / "programmed_target_performance.png", dpi=180,
@@ -439,6 +519,7 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
             report.append("")
         report += ["Every confidence interval above includes differences large enough to matter "
                    "biologically, so these data do not establish equivalence between the groups.", ""]
+    report += _profile_scan(config, loaded, output)
     write_experiment_provenance(output, Path(config_path), stamped)
     # No markdown horizontal rule here: pandoc renders "---" as \rule{}{\linethickness},
     # which this LaTeX stack rejects with "Missing number, treated as zero".

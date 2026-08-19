@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 
 from .io import Session
-from .metrics import add_time_fields, circadian_metrics, corner_entropy, daily_learning, trials_to_criterion, visit_block_learning
+from .metrics import (CHANCE, add_time_fields, boundary_frame, chance_boundary, circadian_metrics,
+                      corner_entropy, daily_learning, trials_to_criterion, visit_block_learning)
 
 
 def _save(fig, path: Path) -> None:
@@ -153,24 +154,52 @@ def tier1(session: Session, output: Path) -> None:
 def tier2(session: Session, output: Path, block_size: int = 100,
           threshold: float = 0.5, consecutive: int = 2) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    daily = daily_learning(session.visits); daily.to_csv(output / "daily_learning.csv", index=False)
+    daily = daily_learning(session.visits)
+    # Each animal-day rests on its own number of choices, so it gets its own
+    # boundary: a 45% day on 20 visits is chance, the same value on 300 is not.
+    bounds = boundary_frame(daily["conditioned_visits"])
+    daily = pd.concat([daily, bounds[["chance_lower", "chance_upper"]]], axis=1)
+    daily["above_chance"] = daily["accuracy"].gt(daily["chance_upper"])
+    daily["below_chance"] = daily["accuracy"].lt(daily["chance_lower"])
+    daily.to_csv(output / "daily_learning.csv", index=False)
     fig, ax = plt.subplots(figsize=(8, 4))
     for animal, frame in daily.groupby("AnimalName"):
         ax.plot(pd.to_datetime(frame["date"]), frame["accuracy"], marker="o", alpha=.55, lw=1, label=animal)
-    cohort = daily.groupby("date")["accuracy"].agg(["mean", "sem"]).reset_index()
+    marked = daily[daily["above_chance"].fillna(False)]
+    if not marked.empty:
+        ax.scatter(pd.to_datetime(marked["date"]), marked["accuracy"], s=90, facecolors="none",
+                   edgecolors="black", linewidths=1.2, zorder=6, label="Above own boundary")
+    cohort = daily.groupby("date").agg(mean=("accuracy", "mean"), sem=("accuracy", "sem"),
+                                       n=("conditioned_visits", "median")).reset_index()
     dates = pd.to_datetime(cohort["date"])
-    ax.plot(dates, cohort["mean"], color="black", lw=2.5, label="Cohort mean")
-    ax.fill_between(dates, cohort["mean"]-cohort["sem"], cohort["mean"]+cohort["sem"], color="black", alpha=.15)
-    ax.axhline(.25, ls="--", color="0.4", label="Four-corner chance")
-    ax.set(xlabel="Date", ylabel="Correct-place visits / all visits", ylim=(0, 1), title="Place-learning acquisition")
-    ax.legend(frameon=False, ncol=2)
+    envelope = boundary_frame(cohort["n"])
+    ax.fill_between(dates, envelope["chance_lower"].fillna(0), envelope["chance_upper"],
+                    color="0.75", alpha=.35, zorder=0,
+                    label="Chance range (binomial, p=0.25, α=0.05)")
+    ax.plot(dates, envelope["chance_upper"], color="0.45", ls="--", lw=1, zorder=1)
+    ax.plot(dates, cohort["mean"], color="black", lw=2.5, label="Cohort mean", zorder=4)
+    ax.fill_between(dates, cohort["mean"]-cohort["sem"], cohort["mean"]+cohort["sem"],
+                    color="black", alpha=.15, zorder=3)
+    ax.set(xlabel="Date", ylabel="Correct-place visits / conditioned visits", ylim=(0, 1),
+           title="Place-learning acquisition")
+    ax.legend(frameon=False, ncol=2, fontsize=7)
     _save(fig, output / "daily_learning.png")
-    blocks = visit_block_learning(session.visits, block_size); blocks.to_csv(output / "visit_block_learning.csv", index=False)
+    blocks = visit_block_learning(session.visits, block_size)
+    block_bounds = boundary_frame(blocks["visits"])
+    blocks = pd.concat([blocks, block_bounds[["chance_lower", "chance_upper"]]], axis=1)
+    blocks["above_chance"] = blocks["accuracy"].gt(blocks["chance_upper"])
+    blocks.to_csv(output / "visit_block_learning.csv", index=False)
+    lower, upper = chance_boundary(block_size)
     fig, ax = plt.subplots(figsize=(7, 4))
+    ax.axhspan(0 if np.isnan(lower) else lower, upper, color="0.75", alpha=.35, zorder=0,
+               label=f"Chance range, n={block_size}")
+    ax.axhline(upper, ls="--", color="0.45", lw=1, zorder=1)
+    ax.axhline(CHANCE, ls=":", color="0.55", lw=1, zorder=1, label="p = 0.25")
     for animal, frame in blocks.groupby("AnimalName"):
-        ax.plot(frame["block"] * block_size, frame["accuracy"], marker="o", ms=3, label=animal)
-    ax.axhline(.25, ls="--", color="0.4"); ax.set(xlabel="Visits completed", ylabel="Correct-place proportion", ylim=(0, 1), title="Visit-block acquisition")
-    ax.legend(frameon=False); _save(fig, output / "visit_block_learning.png")
+        ax.plot(frame["block"] * block_size, frame["accuracy"], marker="o", ms=3, label=animal, zorder=3)
+    ax.set(xlabel="Conditioned visits completed", ylabel="Correct-place proportion", ylim=(0, 1),
+           title=f"Visit-block acquisition (above {upper:.2f} is above chance)")
+    ax.legend(frameon=False, fontsize=7, ncol=2); _save(fig, output / "visit_block_learning.png")
     criterion = trials_to_criterion(blocks, threshold=threshold, consecutive=consecutive, block_size=block_size)
     criterion.to_csv(output / "trials_to_criterion.csv", index=False)
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -202,6 +231,10 @@ def tier2(session: Session, output: Path, block_size: int = 100,
         terminal = pd.concat([terminal, absent]).sort_values("AnimalName")
     terminal = terminal.rename(columns={"visits": "block_visits"})
     terminal["complete_block"] = terminal["block_visits"].ge(block_size)
+    terminal_bounds = boundary_frame(terminal["block_visits"])
+    terminal["chance_lower"] = terminal_bounds["chance_lower"].to_numpy()
+    terminal["chance_upper"] = terminal_bounds["chance_upper"].to_numpy()
+    terminal["above_chance"] = terminal["accuracy"].gt(terminal["chance_upper"])
     terminal.to_csv(output / "terminal_accuracy.csv", index=False)
     fig, ax = plt.subplots(figsize=(6.5, 4))
     positions = np.arange(len(terminal))
@@ -213,10 +246,14 @@ def tier2(session: Session, output: Path, block_size: int = 100,
         else:
             ax.text(position, .04, f"no complete block (n={int(row['block_visits'])})", rotation=90,
                     ha="center", va="bottom", transform=ax.get_xaxis_transform(), fontsize=7, color="0.4")
-    ax.axhline(.25, ls="--", color="0.4")
+    ax.axhspan(0 if np.isnan(lower) else lower, upper, color="0.75", alpha=.35, zorder=0,
+               label=f"Chance range, n={block_size}")
+    ax.axhline(upper, ls="--", color="0.45", lw=1, zorder=1)
+    ax.axhline(CHANCE, ls=":", color="0.55", lw=1, zorder=1)
+    ax.legend(frameon=False, fontsize=7, loc="upper right")
     ax.set(xticks=positions, xticklabels=terminal["AnimalName"], ylabel="Correct-place proportion",
            xlim=(-.5, len(terminal) - .5), ylim=(0, 1),
-           title=f"Terminal complete {block_size}-visit block by mouse")
+           title=f"Terminal complete {block_size}-visit block (above chance: >{upper:.2f})")
     ax.tick_params(axis="x", rotation=20)
     _save(fig, output / "terminal_accuracy.png")
     x = add_time_fields(session.visits)
@@ -245,7 +282,7 @@ def tier2(session: Session, output: Path, block_size: int = 100,
     fig, ax = plt.subplots(figsize=(6, 4))
     for animal, frame in errors.groupby("AnimalName"):
         ax.scatter(frame["all_visits"], frame["accuracy"], label=animal)
-    ax.axhline(.25, ls="--", color="0.4")
+    ax.axhline(CHANCE, ls=":", color="0.55", label="p = 0.25 (n varies per point; see daily_learning.csv for per-point boundaries)")
     ax.set(xlabel="Visits per day", ylabel="Correct-place proportion", ylim=(0, 1), title="Activity–accuracy dissociation")
     ax.legend(frameon=False)
     _save(fig, output / "activity_accuracy.png")

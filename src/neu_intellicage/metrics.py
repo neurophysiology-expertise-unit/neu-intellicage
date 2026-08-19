@@ -1,7 +1,50 @@
 from __future__ import annotations
 
+from math import comb
+
 import numpy as np
 import pandas as pd
+
+CHANCE = 0.25  # four corners, one rewarded
+
+
+def chance_boundary(n: int, p0: float = CHANCE, alpha: float = 0.05) -> tuple[float, float]:
+    """Two-sided binomial boundaries on a proportion of ``n`` choices under ``p0``.
+
+    Returns (lower, upper) proportions. A point above ``upper`` is above chance
+    at ``alpha``; a point below ``lower`` is below chance, which in a four-corner
+    task means active avoidance of the target rather than failure to learn.
+
+    A flat 25% reference answers "where is chance?" but not "is this mouse above
+    it?", and the answer depends entirely on how many choices the point rests on:
+    with 20 visits chance alone reaches 45%, with 400 it does not pass 30%. The
+    boundary therefore has to move with n, and drawing it makes the reader's eye
+    do the test. This is exact rather than normal-approximate because n is small
+    on partial days and the approximation is poor in the tail.
+    """
+    if n <= 0:
+        return float("nan"), float("nan")
+    tail = alpha / 2
+
+    def survival(k: int) -> float:  # P(X >= k)
+        return sum(comb(n, i) * p0**i * (1 - p0) ** (n - i) for i in range(k, n + 1))
+
+    # An unattainable boundary is NaN, not an out-of-range number: with 10 visits
+    # no count is significantly BELOW 25%, and saying so is the honest answer.
+    upper = next((k for k in range(n + 1) if survival(k) <= tail), None)
+    lower = next((k for k in range(n, -1, -1) if 1 - survival(k + 1) <= tail), None)
+    return (float("nan") if lower is None else lower / n,
+            float("nan") if upper is None else upper / n)
+
+
+def boundary_frame(counts: pd.Series, p0: float = CHANCE, alpha: float = 0.05) -> pd.DataFrame:
+    """Boundaries for a series of denominators, computed once per distinct n."""
+    unique = {int(n): chance_boundary(int(n), p0, alpha) for n in pd.unique(counts.dropna())}
+    return pd.DataFrame({
+        "n": counts.to_numpy(),
+        "chance_lower": [unique[int(n)][0] if pd.notna(n) else np.nan for n in counts],
+        "chance_upper": [unique[int(n)][1] if pd.notna(n) else np.nan for n in counts],
+    }, index=counts.index)
 
 
 def add_time_fields(visits: pd.DataFrame) -> pd.DataFrame:

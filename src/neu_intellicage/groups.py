@@ -107,3 +107,50 @@ def compare_many(values: pd.DataFrame, measures: list[str], groups: dict[str, li
         if measure in values:
             rows.append(compare(values, measure, groups).as_row())
     return pd.DataFrame(rows)
+
+
+def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg adjusted p-values (FDR).
+
+    A profile scan tests a dozen or more measures at once, so an uncorrected
+    0.03 among fifteen tests is the expected best result under the null, not a
+    finding. Note the hard limit this design imposes: with four mice per group
+    the smallest raw p is 1/35, so the smallest possible BH value over m tests
+    is m/35 -- with fifteen measures NOTHING can be significant after
+    correction. The scan is therefore strictly hypothesis-generating, and that
+    is a property of n=4, not of the correction.
+    """
+    p_values = np.asarray(p_values, dtype=float)
+    order = np.argsort(p_values)
+    ranked = p_values[order] * len(p_values) / np.arange(1, len(p_values) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    adjusted = np.empty_like(ranked)
+    adjusted[order] = np.clip(ranked, 0, 1)
+    return adjusted
+
+
+def scan_profile(profile: pd.DataFrame, groups: dict[str, list[str]],
+                 measures: list[str] | None = None) -> pd.DataFrame:
+    """Run every profile measure through the same contrast, then FDR-correct.
+
+    Measures that are constant across animals carry no information and are
+    dropped rather than reported as a null.
+    """
+    skip = {"AnimalName", "GroupName", "conditioned_visits"}
+    candidates = measures or [c for c in profile.columns if c not in skip]
+    rows, dropped = [], []
+    for measure in candidates:
+        values = profile[measure]
+        if values.nunique(dropna=True) <= 1 or values.isna().all():
+            dropped.append(measure)
+            continue
+        try:
+            rows.append(compare(profile[["AnimalName", measure]], measure, groups).as_row())
+        except ValueError:
+            dropped.append(measure)
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return table
+    table["p_adjusted_bh"] = benjamini_hochberg(table["p_value"].to_numpy())
+    table["dropped_constant_measures"] = ", ".join(dropped) if dropped else ""
+    return table.sort_values("p_value").reset_index(drop=True)
