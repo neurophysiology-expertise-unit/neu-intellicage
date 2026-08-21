@@ -48,6 +48,18 @@ visits, correct conditioned visits, and visit-based success rate. Its output
 and metadata are animal-level study files and must remain outside this code
 repository.
 
+To export the matched hourly values behind all-visit and correct-conditioned-
+visit actograms:
+
+```bash
+PYTHONPATH=src python scripts/export_actogram_hourly.py \
+  '/path/to/one/session' --output '/private/path/actogram_hourly'
+```
+
+The canonical CSV stores each date/hour once. Double-plotted figures repeat the
+following day in columns 24–47 for readability; those repeated values are not
+duplicated in the exported data.
+
 `render_report.sh` builds `report.html` and `report.pdf` from the generated
 `report.md` with pandoc, so a delivered PDF can always be rebuilt from the
 committed inputs.
