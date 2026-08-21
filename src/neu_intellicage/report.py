@@ -11,8 +11,9 @@ import pandas as pd
 from . import __version__
 from .io import load_session
 from .metrics import CHANCE, add_time_fields, boundary_frame, daily_learning
-from .plots import nosepoke_acquisition, qc, tier1, tier2
+from .plots import cumulative_learning, nosepoke_acquisition, qc, tier1, tier2
 from .groups import compare_many, scan_profile
+from .focused import all_sessions_light_dark_activity, correct_visit_actograms
 from .profile import MEASURE_BLOCKS, MEASURE_NOTES, animal_profile, contingency_balance
 from .provenance import write_experiment_provenance, write_provenance
 
@@ -222,6 +223,76 @@ def _profile_scan(config: dict, sessions: dict, output: Path) -> list[str]:
     return lines
 
 
+def _focused_questions(config: dict, sessions: dict, output: Path) -> list[str]:
+    """Run explicitly requested add-on analyses and place them in one section."""
+    questions = config.get("focused_questions", [])
+    if not questions:
+        return []
+    lines = ["## Focused questions", ""]
+    for number, spec in enumerate(questions, start=1):
+        if spec["kind"] == "all_sessions_light_dark_activity":
+            folder = output / "focused" / spec.get("id", f"question_{number}")
+            selected = {sid: sessions[sid] for sid in spec["sessions"]}
+            result = all_sessions_light_dark_activity(
+                selected, folder, config["groups"],
+                illumination_threshold=spec.get("illumination_threshold", 10))
+            relative = folder.relative_to(output)
+            comparisons = {row["measure"]: row for row in result["comparisons"]}
+            rate, ratio = comparisons["visits_per_light_hour"], comparisons["light_dark_rate_ratio"]
+            lines += [f"### {spec['title']}", "", spec.get("question", ""), "",
+                      f"![All-August light-versus-dark activity]({relative}/all_august_light_dark_activity.png)", "",
+                      "*All recorded August activity.* The left panel gives each mouse's daily light:dark corner-visit rate ratio from habituation through the interrupted reversal; recording gaps are excluded, and a daily ratio is plotted only when at least three hours were recorded in both light and dark. Partial-day counts remain in the CSV and contribute exposure-weighted information to the combined analysis. The vertical line marks the opposite-target switch. The right panel pools visit counts and recorded illumination exposure across the three sessions, with one labeled dot per mouse and group means as horizontal lines. This measures temporal organization of corner activity, not sleep.", "",
+                      f"Across all recorded August sessions, {rate['group_a']} averaged {rate['mean_a']:.2f} "
+                      f"light-phase visits per hour versus {rate['mean_b']:.2f} in {rate['group_b']} "
+                      f"(difference {rate['difference']:+.2f}, 95% CI {rate['ci_low']:+.2f} to "
+                      f"{rate['ci_high']:+.2f}, exact p={rate['p_value']:.3f}). Mean combined "
+                      f"light:dark ratios were {ratio['mean_a']:.2f} and {ratio['mean_b']:.2f} "
+                      f"(difference {ratio['difference']:+.2f}, 95% CI {ratio['ci_low']:+.2f} to "
+                      f"{ratio['ci_high']:+.2f}, exact p={ratio['p_value']:.3f}).", ""]
+            continue
+        if spec["kind"] != "correct_visit_actograms":
+            raise ValueError(f"unknown focused question kind: {spec['kind']}")
+        folder = output / "focused" / spec.get("id", f"question_{number}")
+        timing = correct_visit_actograms(
+            sessions[spec["session"]], folder, config["groups"],
+            illumination_threshold=spec.get("illumination_threshold", 10),
+        )
+        relative = folder.relative_to(output)
+        lines += [f"### {spec['title']}", "", spec.get("question", ""), "",
+                  f"![Correct-trial-only double-plotted actograms]({relative}/correct_visit_actograms.png)", "",
+                  spec.get("caption", "*Correct-trial-only double-plotted actograms.* Only conditioned visits scored correct by the controller are shown. A shared grayscale maps darkness to correct visits per hour. Yellow bands mark the lights-on interval reconstructed from the recorded illumination channel."), "",
+                  f"![Paired light-versus-dark activity]({relative}/all_visit_light_dark_rates.png)", "",
+                  "*Paired light-versus-dark activity.* The left panel connects each mouse's overall corner-visit rate during recorded dark and light intervals; these are all visits, irrespective of correctness. The right panel shows the same animal's light:dark rate ratio, with short horizontal lines marking group means and 1.0 indicating equal rates. Labels identify individual animals. This tests temporal organization of activity, not sleep and not spatial-learning accuracy.", "",
+                  f"The recorded environment transitions place lights-on at approximately "
+                  f"{timing['light_on']:.2f} h and lights-off at {timing['light_off']:.2f} h. "
+                  f"Per-animal and group summaries are saved beside the figure; interpret the "
+                  f"illuminated interval as a likely rest phase, not a direct measurement of sleep.", ""]
+        comparisons = {row["measure"]: row for row in timing["comparisons"]}
+        rate = comparisons["correct_visits_per_light_hour"]
+        ratio = comparisons["light_dark_rate_ratio"]
+        all_rate = comparisons["all_visits_per_light_hour"]
+        all_ratio = comparisons["all_visit_light_dark_rate_ratio"]
+        lines += [f"Across mice, {rate['group_a']} averaged {rate['mean_a']:.2f} correct visits per "
+                  f"recorded light hour versus {rate['mean_b']:.2f} in {rate['group_b']} "
+                  f"(difference {rate['difference']:+.2f}, 95% CI {rate['ci_low']:+.2f} to "
+                  f"{rate['ci_high']:+.2f}, exact p={rate['p_value']:.3f}). The mean light:dark "
+                  f"correct-visit rate ratio was {ratio['mean_a']:.2f} versus {ratio['mean_b']:.2f} "
+                  f"(difference {ratio['difference']:+.2f}, 95% CI {ratio['ci_low']:+.2f} to "
+                  f"{ratio['ci_high']:+.2f}, exact p={ratio['p_value']:.3f}). These are exploratory "
+                  f"contrasts at n={int(rate['n_a'])} versus n={int(rate['n_b'])}; the individual "
+                  f"actograms and effect sizes are more informative than the p-values here.", ""]
+        lines += [f"For all corner visits irrespective of correctness, {all_rate['group_a']} averaged "
+                  f"{all_rate['mean_a']:.2f} visits per recorded light hour versus "
+                  f"{all_rate['mean_b']:.2f} in {all_rate['group_b']} (difference "
+                  f"{all_rate['difference']:+.2f}, 95% CI {all_rate['ci_low']:+.2f} to "
+                  f"{all_rate['ci_high']:+.2f}, exact p={all_rate['p_value']:.3f}). The corresponding "
+                  f"mean light:dark all-visit rate ratios were {all_ratio['mean_a']:.2f} and "
+                  f"{all_ratio['mean_b']:.2f} (difference {all_ratio['difference']:+.2f}, 95% CI "
+                  f"{all_ratio['ci_low']:+.2f} to {all_ratio['ci_high']:+.2f}, exact "
+                  f"p={all_ratio['p_value']:.3f}).", ""]
+    return lines
+
+
 def _session_overview(session, output: Path) -> dict:
     x = add_time_fields(session.visits)
     daily = daily_learning(session.visits)
@@ -416,6 +487,9 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
             ax.set(yticks=[1, 2, 3, 4], ylabel="Programmed correct corner", xlabel="Date", title="Target corner recorded in visit conditions")
             ax.legend(frameon=False); fig.tight_layout(); fig.savefig(session_output / "target_corner_by_day.png", dpi=180); plt.close(fig)
             _programmed_target_analysis(session, session_output)
+            if item.get("cumulative_learning_phases"):
+                cumulative_learning(session, session_output / "tier2",
+                                    item["cumulative_learning_phases"], config.get("groups"))
         write_provenance(session_output, session.path, {"stage": item["stage"], "block_size": config.get("block_size", 100), "excluded_animals": excluded})
         stamped.append({"id": item["id"], "source": str(session.path),
                         "provenance": f"sessions/{item['id']}/provenance.json"})
@@ -426,6 +500,21 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
     for item in config["sessions"]:
         report.append(f"**{codes[item['id']]}** — `{item['id']}`. {item['stage']}.")
         report.append("")
+    timeline = config.get("procedure_timeline", [])
+    if timeline:
+        pd.DataFrame(timeline).to_csv(output / "procedure_timeline.csv", index=False)
+        (output / "procedure_timeline.json").write_text(json.dumps(timeline, indent=2) + "\n")
+        report += ["## Procedure timeline and safe analysis windows", "",
+                   "Times are local laboratory time (Europe/Brussels, UTC+02:00). Session starts come directly from `Sessions.xml`. Automatic contingency changes are not emitted as explicit controller events, so their initiation is bracketed by the last visit proving the old rule and the first visit proving the new rule. `safe_start` and `safe_end` are conservative boundaries for analyses that must not mix procedures.", "",
+                   "| Procedure | Initiation or verified bracket | Safe analysis window | Evidence |",
+                   "|:--|:--|:--|:--|"]
+        for phase in timeline:
+            initiation = phase.get("initiation_local") or (
+                f"after {phase.get('last_old_rule_local', '?')} and no later than "
+                f"{phase.get('first_new_rule_local', '?')}")
+            safe = f"{phase.get('safe_start_local', '—')} to {phase.get('safe_end_local', '—')}"
+            report.append(f"| {phase['procedure']} | {initiation} | {safe} | {phase['evidence']} |")
+        report += ["", "The complete machine-readable timeline, including session identifiers, precision labels, and notes, is stored in `procedure_timeline.csv` and `procedure_timeline.json` beside this report.", ""]
     report += ["## Quick-look figures", ""]
     for item in config["sessions"]:
         sid = item["id"]
@@ -455,6 +544,9 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
                        item.get("programmed_target_caption", "*Original versus opposite target.* Cohort-average preference for the original acquisition corner (blue), its diagonal opposite (orange), and the currently programmed target (black). A/O labels show which contingency was recorded that day. This distinguishes acquisition, opposite-target exposure, and any unintended return to the original target."), "",
                        f"![Visit-block learning](sessions/{sid}/tier2/visit_block_learning.png)", "",
                        "*Visit-block learning.* Correct-place proportion in consecutive blocks of 100 CONDITIONED visits per mouse. This gives finer acquisition resolution than calendar days and avoids treating a quiet day as equally informative as a busy day. Blocks spanning a midnight target change require caution; they are not phase-pure.", "",
+                       *([f"![Cumulative drinking-attempt learning](sessions/{sid}/tier2/cumulative_learning.png)", "",
+                          "*Cumulative drinking-attempt learning.* Each faint trajectory is one mouse's cumulative successful attempts, counting only conditioned corner visits that contained at least one nose-poke; exploratory visits without a nose-poke are excluded. Bold lines are group mean mouse-level success slopes with 95% bootstrap confidence bands, and the dashed line is the 25% four-corner chance slope. Panels are reset at the start of each controller-verified phase, so acquisition, the one-day opposite-target exposure, and the unintended restored-initial exposure are not combined. This is inspired by the IntelliR presentation of Daguano Gastaldi et al. (2025), but uses the mouse—not pooled attempts—as the unit for group summaries.", ""]
+                         if item.get("cumulative_learning_phases") else []),
                        f"![Activity and accuracy](sessions/{sid}/tier2/activity_accuracy.png)", "",
                        "*Activity–accuracy relationship.* Each point is one mouse-day: total visits on the x-axis and currently programmed-corner accuracy on the y-axis. It helps distinguish altered activity from altered choice accuracy, but with four control animals it is descriptive and is not a treatment-effect test.", "",
                        f"![Error decomposition](sessions/{sid}/tier2/error_decomposition.png)", "",
@@ -474,6 +566,7 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
         report += ["## Interim findings", ""]
         for paragraph in config["interim_findings"]:
             report += [paragraph, ""]
+    report += _focused_questions(config, loaded, output)
     interpretation_status = config.get("interpretation_status", [
         "This is a descriptive screening report. Treatment identity, light/dark schedule, exact phase-switch timestamps, reward contingencies, and planned stopping criteria require confirmation before inferential analysis.",
     ])
@@ -483,7 +576,7 @@ def build_experiment_report(config_path: str | Path, output: str | Path) -> Path
     report += ["## Analysis provenance", "",
                "- Session inventory, visit counts, nosepoke counts, corner use and hardware-event summaries are direct quality-control views of the exported tables.",
                "- Individual/cohort learning curves, visit blocks, terminal accuracy, trials-to-criterion, error decomposition and activity–accuracy separation implement the outcomes pre-specified in `projects/intellicage/plan.md` §8.",
-               "- Actograms and IS/IV/RA circadian summaries were motivated by the spontaneous-activity signature discussed from Voikar et al. (2018) in that plan; they are descriptive here because the lighting schedule has not been verified.",
+               "- Actograms and IS/IV/RA circadian summaries were motivated by the spontaneous-activity signature discussed from Voikar et al. (2018) in that plan. Generic session plots retain a nominal 19:00–07:00 dark phase; focused analyses that state otherwise reconstruct actual transitions from that session's `Environment.txt` illumination channel.",
                "- Phase names, the intended 17 July 00:01 reversal, four balanced target corners and the seven-second nosepoke door rule came from the archived learning log/pilot report and NewBehavior place-learning tutorial.",
                "- No values were copied from the earlier AI reports. Plotted values were recomputed from `Visits.txt`, `Nosepokes.txt`, `Animals.txt`, and `HardwareEvents.txt`. Where the earlier narrative conflicts with those tables, the raw export controls the current report.", ""]
     contrasts = _group_comparison(config, loaded, output)

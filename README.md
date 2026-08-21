@@ -30,6 +30,24 @@ neu-intellicage experiment-report experiment.json --output /path/to/project/anal
 scripts/render_report.sh /path/to/project/analysis/experiments/name
 ```
 
+To create a private, share-ready hourly learning table without RFID tags:
+
+```bash
+PYTHONPATH=src python scripts/export_hourly_learning.py \
+  '/path/to/one/session' \
+  --start '2026-08-14 16:57:11.459' \
+  --end '2026-08-17 23:59:49.133' \
+  --output '/private/path/hourly_learning.csv' \
+  --tau-animals 'Animal 1' 'Animal 2' \
+  --scramble-animals 'Animal 5' 'Animal 6'
+```
+
+The exporter writes one row per animal and absolute clock hour, retains
+zero-visit hours, marks partial hours, and reports visits, licks, conditioned
+visits, correct conditioned visits, and visit-based success rate. Its output
+and metadata are animal-level study files and must remain outside this code
+repository.
+
 `render_report.sh` builds `report.html` and `report.pdf` from the generated
 `report.md` with pandoc, so a delivered PDF can always be rebuilt from the
 committed inputs.

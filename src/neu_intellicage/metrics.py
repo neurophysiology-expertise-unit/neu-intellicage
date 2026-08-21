@@ -113,6 +113,41 @@ def daily_learning(visits: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def cumulative_drinking_learning(visits: pd.DataFrame, nosepokes: pd.DataFrame,
+                                 phases: list[dict]) -> pd.DataFrame:
+    """Trial-by-trial cumulative successes for explicitly declared phases.
+
+    Following IntelliR, a drinking attempt is a visit containing at least one
+    nose-poke. Only conditioned visits can be scored. Phase dates are supplied
+    explicitly because a controller error or re-reversal must never be silently
+    combined with the intended reversal phase.
+    """
+    columns = ["phase", "AnimalName", "GroupName", "attempt_number",
+               "cumulative_successes", "success", "VisitID", "Start"]
+    if nosepokes.empty or not phases:
+        return pd.DataFrame(columns=columns)
+    x = add_time_fields(visits)
+    attempted = set(nosepokes["VisitID"].dropna().unique())
+    x = x[x["conditioned"] & x["VisitID"].isin(attempted)].copy()
+    rows = []
+    for phase in phases:
+        part = _phase_dates(x, phase.get("dates", []))
+        part = part.sort_values(["AnimalName", "Start", "VisitID"]).copy()
+        if part.empty:
+            continue
+        part["phase"] = phase["label"]
+        part["attempt_number"] = part.groupby("AnimalName").cumcount() + 1
+        part["success"] = part["correct"].astype(int)
+        part["cumulative_successes"] = part.groupby("AnimalName")["success"].cumsum()
+        rows.append(part[columns])
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=columns)
+
+
+def _phase_dates(frame: pd.DataFrame, dates: list[str]) -> pd.DataFrame:
+    wanted = {pd.Timestamp(date).date() for date in dates}
+    return frame[frame["date"].isin(wanted)]
+
+
 def visit_block_learning(visits: pd.DataFrame, block_size: int = 100) -> pd.DataFrame:
     """Accuracy in consecutive blocks of ``block_size`` conditioned visits.
 

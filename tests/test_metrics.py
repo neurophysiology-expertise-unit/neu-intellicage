@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from neu_intellicage.metrics import daily_learning, trials_to_criterion, visit_block_learning
+from neu_intellicage.metrics import (cumulative_drinking_learning, daily_learning,
+                                     trials_to_criterion, visit_block_learning)
 from neu_intellicage.report import _target_by_day
 
 
@@ -80,3 +81,17 @@ def test_criterion_requires_adjacent_blocks():
     assert pd.isna(trials_to_criterion(blocks, block_size=100)["trials_to_criterion"].iloc[0])
     blocks.loc[2, "accuracy"] = 0.9
     assert trials_to_criterion(blocks, block_size=100)["trials_to_criterion"].iloc[0] == 800
+
+
+def test_cumulative_learning_uses_nosepoke_visits_and_resets_by_phase():
+    frame = visits(corner_condition=[1, -1, 1, 1, -1, -1])
+    pokes = pd.DataFrame({"VisitID": [0, 1, 1, 2, 3, 4]})
+    phases = [{"label": "day 1", "dates": ["2026-01-01"]},
+              {"label": "day 2", "dates": ["2026-01-02"]}]
+    result = cumulative_drinking_learning(frame, pokes, phases)
+    a1 = result[(result.AnimalName.eq("A")) & result.phase.eq("day 1")]
+    a2 = result[(result.AnimalName.eq("A")) & result.phase.eq("day 2")]
+    assert a1["attempt_number"].tolist() == [1, 2]
+    assert a1["cumulative_successes"].tolist() == [1, 1]
+    assert a2["attempt_number"].tolist() == [1, 2]
+    assert a2["cumulative_successes"].tolist() == [1, 2]

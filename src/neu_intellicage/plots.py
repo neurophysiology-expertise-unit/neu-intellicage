@@ -8,7 +8,8 @@ import pandas as pd
 
 from .io import Session
 from .metrics import (CHANCE, add_time_fields, boundary_frame, chance_boundary, circadian_metrics,
-                      corner_entropy, daily_learning, trials_to_criterion, visit_block_learning)
+                      corner_entropy, cumulative_drinking_learning, daily_learning,
+                      trials_to_criterion, visit_block_learning)
 
 
 def _save(fig, path: Path) -> None:
@@ -67,6 +68,66 @@ def nosepoke_acquisition(session: Session, output: Path) -> None:
            ylim=(0, 1), title="Individual daily nose-poke acquisition")
     ax.legend(frameon=False, bbox_to_anchor=(1.02, 1), loc="upper left")
     _save(fig, output / "daily_nosepoke_acquisition.png")
+
+
+def cumulative_learning(session: Session, output: Path, phases: list[dict],
+                        groups: dict[str, list[str]] | None = None) -> None:
+    """Plot literature-style cumulative success curves by declared phase."""
+    attempts = cumulative_drinking_learning(session.visits, session.nosepokes, phases)
+    if attempts.empty:
+        return
+    output.mkdir(parents=True, exist_ok=True)
+    animal_group = {animal: group for group, animals in (groups or {}).items()
+                    for animal in animals}
+    attempts["AnalysisGroup"] = attempts["AnimalName"].map(animal_group).fillna(
+        attempts["GroupName"].astype(str))
+    attempts.to_csv(output / "cumulative_drinking_attempts.csv", index=False)
+
+    terminal = attempts.sort_values("attempt_number").groupby(
+        ["phase", "AnalysisGroup", "AnimalName"], as_index=False).tail(1).copy()
+    terminal["success_slope"] = terminal["cumulative_successes"] / terminal["attempt_number"]
+    terminal[["phase", "AnalysisGroup", "AnimalName", "attempt_number",
+              "cumulative_successes", "success_slope"]].to_csv(
+                  output / "cumulative_learning_slopes_by_animal.csv", index=False)
+
+    labels = [phase["label"] for phase in phases if phase["label"] in set(attempts["phase"])]
+    fig, axes = plt.subplots(1, len(labels), figsize=(6 * len(labels), 5), squeeze=False)
+    palette = {name: f"C{i}" for i, name in enumerate(sorted(attempts["AnalysisGroup"].unique()))}
+    summary_rows = []
+    rng = np.random.default_rng(20260820)
+    for ax, label in zip(axes.flat, labels):
+        phase_data = attempts[attempts["phase"].eq(label)]
+        phase_terminal = terminal[terminal["phase"].eq(label)]
+        max_attempt = int(phase_data["attempt_number"].max())
+        xline = np.arange(max_attempt + 1)
+        ax.plot(xline, CHANCE * xline, ls="--", color="0.35", lw=1.5,
+                label="25% chance slope")
+        for animal, frame in phase_data.groupby("AnimalName"):
+            group = frame["AnalysisGroup"].iloc[0]
+            ax.plot(frame["attempt_number"], frame["cumulative_successes"],
+                    color=palette[group], alpha=.28, lw=1)
+            last = frame.iloc[-1]
+            ax.text(last["attempt_number"], last["cumulative_successes"],
+                    animal.replace("Animal ", "A"), color=palette[group], fontsize=7,
+                    alpha=.8, ha="left", va="center")
+        for group, frame in phase_terminal.groupby("AnalysisGroup"):
+            slopes = frame["success_slope"].to_numpy(float)
+            mean = float(slopes.mean())
+            samples = rng.choice(slopes, size=(10000, len(slopes)), replace=True).mean(axis=1)
+            low, high = np.quantile(samples, [.025, .975])
+            ax.fill_between(xline, low * xline, high * xline,
+                            color=palette[group], alpha=.14)
+            ax.plot(xline, mean * xline, color=palette[group], lw=2.5,
+                    label=f"{group} mean slope ({mean:.2f})")
+            summary_rows.append({"phase": label, "AnalysisGroup": group,
+                                 "animals": len(slopes), "mean_success_slope": mean,
+                                 "bootstrap_ci_lower": low, "bootstrap_ci_upper": high})
+        ax.set(title=label, xlabel="Drinking-attempt number",
+               ylabel="Cumulative successful attempts", xlim=(0, max_attempt))
+        ax.legend(frameon=False, fontsize=8, loc="upper left")
+    pd.DataFrame(summary_rows).to_csv(output / "cumulative_learning_group_summary.csv", index=False)
+    fig.suptitle("Cumulative place-learning success by drinking attempt")
+    _save(fig, output / "cumulative_learning.png")
 
 
 def tier1(session: Session, output: Path) -> None:
