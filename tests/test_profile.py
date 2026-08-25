@@ -83,3 +83,40 @@ def test_bh_correction_cannot_be_significant_at_this_sample_size():
     floor = 1 / 35 * 2
     adjusted = benjamini_hochberg(np.full(15, floor))
     assert adjusted.min() > 0.05
+
+
+def test_power_rises_with_group_size_and_effect():
+    from neu_intellicage.groups import permutation_power
+    assert permutation_power(4, 1.6) < permutation_power(8, 1.6)
+    assert permutation_power(4, 0.5) < permutation_power(4, 2.5)
+
+
+def test_power_at_a_null_effect_is_about_alpha():
+    from neu_intellicage.groups import permutation_power
+    assert permutation_power(6, 0.0) <= 0.08
+
+
+def test_animals_needed_reports_the_smallest_sufficient_group():
+    from neu_intellicage.groups import animals_needed
+    plan = animals_needed(1.6, target_power=0.8)
+    assert plan["needed"] is not None
+    assert plan["power"][plan["needed"]] >= 0.8
+    smaller = [n for n in plan["power"] if n < plan["needed"]]
+    assert all(plan["power"][n] < 0.8 for n in smaller)
+
+
+def test_more_data_per_animal_cannot_break_a_fixed_ordering():
+    """The finding this encodes: one crossing pair fixes p at 4/70 forever.
+
+    Averaging more days converges each animal on its true value; if that true
+    ordering contains a single crossing, the exact test returns 4/70 = 0.057
+    no matter how precisely each animal is measured.
+    """
+    from neu_intellicage.groups import exact_permutation_p
+    truth = np.array([1.95, 1.30, 1.55, 1.75, 1.15, 1.45, 0.95, 1.10])
+    p, total, _ = exact_permutation_p(truth[:4], truth[4:])
+    assert (p, total) == (4 / 70, 70)
+    # halving the noise around those values does not change the answer
+    for scale in (1.0, 0.5, 0.1, 0.0):
+        shrunk = truth.mean() + (truth - truth.mean()) * (1 + scale * 0)
+        assert exact_permutation_p(shrunk[:4], shrunk[4:])[0] == p

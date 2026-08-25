@@ -12,7 +12,7 @@ from . import __version__
 from .io import load_session
 from .metrics import CHANCE, add_time_fields, boundary_frame, daily_learning
 from .plots import cumulative_learning, nosepoke_acquisition, qc, tier1, tier2
-from .groups import compare_many, scan_profile
+from .groups import animals_needed, compare_many, hedges_g, scan_profile
 from .focused import all_sessions_light_dark_activity, correct_visit_actograms
 from .profile import MEASURE_BLOCKS, MEASURE_NOTES, animal_profile, contingency_balance
 from .provenance import write_experiment_provenance, write_provenance
@@ -176,6 +176,12 @@ def _profile_scan(config: dict, sessions: dict, output: Path) -> list[str]:
         return []
     balance = contingency_balance(session, groups)
     balance.to_csv(output / "profile_contingency_balance.csv", index=False)
+    values = profile.set_index("AnimalName")
+    members_a, members_b = list(groups.values())
+    table["hedges_g"] = [
+        hedges_g(values[m].reindex(members_a).dropna().to_numpy(float),
+                 values[m].reindex(members_b).dropna().to_numpy(float))
+        for m in table["measure"]]
     codes = {m: f"P{i}" for i, m in enumerate(table["measure"], start=1)}
     table.insert(0, "code", table["measure"].map(codes))
     table.to_csv(output / "profile_scan.csv", index=False)
@@ -196,12 +202,13 @@ def _profile_scan(config: dict, sessions: dict, output: Path) -> list[str]:
                   f"experience the same corner contingency: {fractions} of visits were conditioned. "
                   f"Any difference below is as consistent with the differing contingency as with "
                   f"treatment, and must not be reported as a treatment effect.", ""]
-    lines += [f"| | {group_a} | {group_b} | Difference | 95% CI | p | p (BH) |",
-              "|:--|---:|---:|---:|:---:|---:|---:|"]
+    lines += [f"| | {group_a} | {group_b} | Difference | 95% CI | g | p | p (BH) |",
+              "|:--|---:|---:|---:|:---:|---:|---:|---:|"]
     for _, row in table.iterrows():
+        effect = "n/a" if not np.isfinite(row["hedges_g"]) else f"{row['hedges_g']:+.2f}"
         lines.append(f"| **{row['code']}** | {row['mean_a']:.3f} | {row['mean_b']:.3f} | "
                      f"{row['difference']:+.3f} | [{row['ci_low']:+.3f}, {row['ci_high']:+.3f}] | "
-                     f"{row['p_value']:.3f} | {row['p_adjusted_bh']:.3f} |")
+                     f"{effect} | {row['p_value']:.3f} | {row['p_adjusted_bh']:.3f} |")
     tests = len(table)
     lines += ["",
               f"Group means are over n={n_a} {group_a} and n={n_b} {group_b} mice. "
@@ -211,6 +218,39 @@ def _profile_scan(config: dict, sessions: dict, output: Path) -> list[str]:
               f"That is a property of the sample size, not of these mice. Read the table for the "
               f"direction and size of differences and for which measures deserve to be pre-specified "
               f"in a properly powered cohort.", ""]
+    # Correlated measures are not independent findings. Without this, three hits
+    # among nineteen measures reads as three results when it can be one property
+    # of the animal measured three ways -- L5 and RA are correlated at -1.00 by
+    # construction, since RA is computed from L5.
+    leading = table.head(min(5, len(table)))["measure"].tolist()
+    numeric = profile.set_index("AnimalName")[leading].astype(float)
+    correlation = numeric.corr(method="spearman")
+    correlation.to_csv(output / "profile_scan_correlations.csv")
+    pairs = [(a, b, correlation.loc[a, b]) for i, a in enumerate(leading)
+             for b in leading[i + 1:] if abs(correlation.loc[a, b]) >= 0.8]
+    if pairs:
+        described = "; ".join(f"`{a}` and `{b}` at rho={value:+.2f}" for a, b, value in pairs)
+        lines += ["> **The leading measures are not independent of one another.** Among the top "
+                  f"{len(leading)} rows, {described}. Several of them are different summaries of the "
+                  "same property -- how evenly an animal spreads its activity across the day -- and "
+                  "RA is computed from L5, so those two are related by construction. Count this as "
+                  "one candidate finding measured several ways, not as several findings, and note "
+                  "that Benjamini-Hochberg assumes far less dependence than this. Full matrix: "
+                  "`profile_scan_correlations.csv`.", ""]
+    strongest = table.iloc[table["hedges_g"].abs().fillna(0).idxmax()]
+    plan = animals_needed(strongest["hedges_g"])
+    if plan["needed"]:
+        curve = ", ".join(f"n={n}: {power:.0%}" for n, power in plan["power"].items() if n <= 10)
+        lines += [f"The largest effect here is **{strongest['code']}** "
+                  f"(`{strongest['measure']}`, g={strongest['hedges_g']:+.2f}). At that effect size "
+                  f"the exact permutation test has {plan['power'][n_a]:.0%} power with "
+                  f"{n_a} animals per group and would need **{plan['needed']} per group** to reach "
+                  f"{plan['target_power']:.0%} ({curve}). More RECORDING DAYS cannot substitute: "
+                  f"the test's resolution is set by the number of animals, not by the amount of data "
+                  f"per animal, so a longer recording sharpens each animal's value and the confidence "
+                  f"interval without changing what the test can resolve. The effect size is itself "
+                  f"estimated from these few animals, so treat this as planning arithmetic rather "
+                  f"than a promise.", ""]
     for _, row in table.iterrows():
         note = MEASURE_NOTES.get(row["measure"], "")
         block = next((name for name, members in MEASURE_BLOCKS.items()

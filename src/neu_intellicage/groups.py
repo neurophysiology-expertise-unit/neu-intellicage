@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from math import comb
 
 import numpy as np
 import pandas as pd
@@ -161,6 +162,7 @@ def scan_profile(profile: pd.DataFrame, groups: dict[str, list[str]],
 
 
 CLUSTER_FORMING_THRESHOLD = 2.0
+PERMUTATION_ENUMERATION_CAP = 20000
 
 
 def hedges_g(a: np.ndarray, b: np.ndarray) -> float:
@@ -276,3 +278,48 @@ def cluster_permutation(hourly: pd.DataFrame, groups: dict[str, list[str]],
     return {"clusters": sorted(clusters, key=lambda c: -abs(c["mass"])),
             "n_animals": len(kept), "n_permutations": len(splits),
             "threshold": threshold, "dropped": [a for a in members if a not in kept]}
+
+
+def permutation_power(n_per_group: int, effect_g: float, trials: int = 2000,
+                      alpha: float = 0.05, seed: int = RNG_SEED) -> float:
+    """Power of the exact permutation test at a standardised effect ``effect_g``.
+
+    Enumerates the splits once and applies them to every simulated dataset at
+    once, because the honest version of this calculation is run over several
+    candidate group sizes and the naive loop is minutes of work per size.
+    """
+    rng = np.random.default_rng(seed)
+    total = comb(2 * n_per_group, n_per_group)
+    if total <= PERMUTATION_ENUMERATION_CAP:
+        masks = np.array([[i in pick for i in range(2 * n_per_group)]
+                          for pick in combinations(range(2 * n_per_group), n_per_group)])
+    else:
+        # Above the cap, enumerating every split costs more than it buys: at
+        # n=16 there are 601 million. Sample instead, seeded so the answer is
+        # reproducible, and accept that the p-values are Monte Carlo.
+        draws = np.argsort(rng.random((PERMUTATION_ENUMERATION_CAP, 2 * n_per_group)), axis=1)
+        masks = draws < n_per_group
+    data = np.concatenate([rng.normal(effect_g, 1, (trials, n_per_group)),
+                           rng.normal(0, 1, (trials, n_per_group))], axis=1)
+    differences = np.abs(data @ masks.T - data @ (~masks).T) / n_per_group
+    observed = np.abs(data[:, :n_per_group].mean(1) - data[:, n_per_group:].mean(1))[:, None]
+    p_values = (differences >= observed - 1e-12).mean(axis=1)
+    return float((p_values <= alpha).mean())
+
+
+def animals_needed(effect_g: float, target_power: float = 0.8,
+                   candidates: tuple[int, ...] = (4, 5, 6, 8, 10, 12, 16)) -> dict:
+    """Smallest group size reaching ``target_power`` at the observed effect.
+
+    Reported so that a non-significant result carries its own remedy. "Not
+    significant at n=4" invites either dropping the measure or running a few
+    more animals and hoping; this says which of those is the waste. Note the
+    effect size is estimated from the same small sample, so it is itself
+    uncertain and this is a planning aid, not a promise.
+    """
+    if not np.isfinite(effect_g) or effect_g == 0:
+        return {"effect_g": effect_g, "needed": None, "power": {}}
+    curve = {n: permutation_power(n, abs(effect_g)) for n in candidates}
+    needed = next((n for n in candidates if curve[n] >= target_power), None)
+    return {"effect_g": abs(effect_g), "needed": needed,
+            "target_power": target_power, "power": curve}
