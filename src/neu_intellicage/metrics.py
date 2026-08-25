@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from math import comb
-
 import numpy as np
 import pandas as pd
 
@@ -25,16 +23,24 @@ def chance_boundary(n: int, p0: float = CHANCE, alpha: float = 0.05) -> tuple[fl
     if n <= 0:
         return float("nan"), float("nan")
     tail = alpha / 2
-
-    def survival(k: int) -> float:  # P(X >= k)
-        return sum(comb(n, i) * p0**i * (1 - p0) ** (n - i) for i in range(k, n + 1))
-
+    # Build the pmf once by the recurrence pmf[k+1] = pmf[k] * (n-k)/(k+1) * p/(1-p)
+    # and take cumulative sums. Evaluating each tail independently is O(n) per
+    # count and so O(n^2) per call, which is unusable on a session with thousands
+    # of visits; this is O(n). Working in logs keeps it stable for large n, where
+    # the first pmf term underflows a float.
+    counts = np.arange(n + 1)
+    log_pmf = (np.concatenate([[0.0], np.cumsum(np.log(np.arange(n, 0, -1)) - np.log(np.arange(1, n + 1)))])
+               + counts * np.log(p0) + (n - counts) * np.log1p(-p0))
+    pmf = np.exp(log_pmf - log_pmf.max())
+    pmf /= pmf.sum()
+    upper_tail = np.cumsum(pmf[::-1])[::-1]          # P(X >= k)
+    lower_tail = np.cumsum(pmf)                      # P(X <= k)
     # An unattainable boundary is NaN, not an out-of-range number: with 10 visits
     # no count is significantly BELOW 25%, and saying so is the honest answer.
-    upper = next((k for k in range(n + 1) if survival(k) <= tail), None)
-    lower = next((k for k in range(n, -1, -1) if 1 - survival(k + 1) <= tail), None)
-    return (float("nan") if lower is None else lower / n,
-            float("nan") if upper is None else upper / n)
+    above = np.flatnonzero(upper_tail <= tail)
+    below = np.flatnonzero(lower_tail <= tail)
+    return (float("nan") if below.size == 0 else int(below[-1]) / n,
+            float("nan") if above.size == 0 else int(above[0]) / n)
 
 
 def boundary_frame(counts: pd.Series, p0: float = CHANCE, alpha: float = 0.05) -> pd.DataFrame:

@@ -24,7 +24,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .metrics import add_time_fields, circadian_metrics, corner_entropy
+from .circadian import circadian_profile
+from .metrics import add_time_fields, corner_entropy
 
 DARK_START, DARK_END = 19, 7  # nominal; unverified against the room schedule
 
@@ -95,7 +96,12 @@ def animal_profile(session, dates: list[str] | None = None) -> pd.DataFrame:
             "conditioned_visits": int(frame["conditioned"].sum()),
         })
     profile = pd.DataFrame(rows)
-    rhythm = circadian_metrics(x)[["AnimalName", "IS", "IV", "RA"]]
+    # Cosinor and the M10/L5 decomposition come from circadian.py, ported from
+    # neu-oldenlabs. L5 in particular is worth having separately from RA: RA can
+    # fall either because the active phase is weaker or because the rest phase is
+    # noisier, and only L5 tells the two apart.
+    rhythm = circadian_profile(pd.DataFrame(x))[
+        ["AnimalName", "mesor", "amplitude", "acrophase_hour", "M10", "L5", "RA", "IS", "IV"]]
     profile = profile.merge(rhythm, on="AnimalName", how="left")
     profile = profile.merge(corner_entropy(x), on="AnimalName", how="left")
     return profile
@@ -106,7 +112,8 @@ MEASURE_BLOCKS = {
                  "nosepokes_per_visit", "nosepoke_probability"],
     "Mobility": ["corner_switch_rate", "corners_used_per_day", "active_hours_per_day",
                  "corner_entropy_bits"],
-    "Rhythm": ["ivi_median_min", "burstiness", "dark_phase_visit_fraction", "IS", "IV", "RA"],
+    "Rhythm": ["ivi_median_min", "burstiness", "dark_phase_visit_fraction", "IS", "IV", "RA",
+               "mesor", "amplitude", "acrophase_hour", "M10", "L5"],
     "Task": ["accuracy"],
 }
 
@@ -125,7 +132,12 @@ MEASURE_NOTES = {
     "dark_phase_visit_fraction": "proportion of visits in the nominal dark phase, 19:00-07:00, UNVERIFIED",
     "IS": "interdaily stability; higher means a more reproducible daily pattern",
     "IV": "intradaily variability; higher means a more fragmented day",
-    "RA": "relative amplitude of the rest-activity rhythm",
+    "RA": "relative amplitude of the rest-activity rhythm, (M10-L5)/(M10+L5)",
+    "mesor": "cosinor rhythm-adjusted mean, visits per hour",
+    "amplitude": "cosinor amplitude, visits per hour",
+    "acrophase_hour": "cosinor peak, clock hour; CIRCULAR, tested by compare_phase not by a mean",
+    "M10": "mean visits per hour over the most active 10 consecutive hours",
+    "L5": "mean visits per hour over the least active 5 consecutive hours; the rest phase",
     "accuracy": "proportion of conditioned visits made to the target corner",
 }
 

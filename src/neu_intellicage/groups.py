@@ -136,7 +136,11 @@ def scan_profile(profile: pd.DataFrame, groups: dict[str, list[str]],
     Measures that are constant across animals carry no information and are
     dropped rather than reported as a null.
     """
-    skip = {"AnimalName", "GroupName", "conditioned_visits"}
+    # Circular quantities such as acrophase cannot go through a difference-of-means
+    # test: values straddling midnight average to midday. They are tested by
+    # circadian.compare_phase instead and excluded here rather than silently wrong.
+    from .circadian import CIRCULAR_MEASURES
+    skip = {"AnimalName", "GroupName", "conditioned_visits", *CIRCULAR_MEASURES}
     candidates = measures or [c for c in profile.columns if c not in skip]
     rows, dropped = [], []
     for measure in candidates:
@@ -154,3 +158,121 @@ def scan_profile(profile: pd.DataFrame, groups: dict[str, list[str]],
     table["p_adjusted_bh"] = benjamini_hochberg(table["p_value"].to_numpy())
     table["dropped_constant_measures"] = ", ".join(dropped) if dropped else ""
     return table.sort_values("p_value").reset_index(drop=True)
+
+
+CLUSTER_FORMING_THRESHOLD = 2.0
+
+
+def hedges_g(a: np.ndarray, b: np.ndarray) -> float:
+    """Standardised difference in means with the small-sample correction.
+
+    The analysis plan requires an effect size with every contrast, significant
+    or not. A raw difference in visits per hour is not comparable with a raw
+    difference in burstiness; g is, which is what makes a scan across measures
+    readable as "which of these is the biggest effect" rather than "which has
+    the biggest number". At n=4 per group the correction matters: it shrinks g
+    by about 6%.
+    """
+    if len(a) < 2 or len(b) < 2:
+        return float("nan")
+    pooled_df = (len(a) - 1) + (len(b) - 1)
+    pooled_sd = np.sqrt(((len(a) - 1) * a.var(ddof=1) + (len(b) - 1) * b.var(ddof=1)) / pooled_df)
+    if pooled_sd == 0:
+        return float("nan")
+    correction = 1 - 3 / (4 * (len(a) + len(b)) - 9)
+    return float((a.mean() - b.mean()) / pooled_sd * correction)
+
+
+def _label_splits(n: int, k: int) -> list[np.ndarray]:
+    """Every way of labelling k of n animals as group A."""
+    splits = []
+    for pick in combinations(range(n), k):
+        mask = np.zeros(n, dtype=bool)
+        mask[list(pick)] = True
+        splits.append(mask)
+    return splits
+
+
+def _find_clusters(statistic: np.ndarray, threshold: float) -> list[dict]:
+    """Contiguous same-signed runs of hours above threshold, treating 24h as CIRCULAR.
+
+    Hour 23 is adjacent to hour 0, so a cluster may wrap past midnight. Rotating
+    the array to start at a genuine boundary -- an index that does not continue
+    the run ending at the previous index -- lets one ordinary linear scan find
+    each run exactly once; scanning the raw array would split a wrapping cluster
+    in two and report both halves.
+    """
+    n = len(statistic)
+    active = np.abs(statistic) > threshold
+    sign = np.sign(statistic)
+    if not active.any():
+        return []
+    if active.all() and len(set(sign)) == 1:
+        return [{"hours": list(range(n)), "mass": float(statistic.sum()), "sign": int(sign[0])}]
+    rotate_at = next(i for i in range(n)
+                     if not (active[i] and active[i - 1] and sign[i] == sign[i - 1]))
+    order = [(rotate_at + offset) % n for offset in range(n)]
+    runs, start = [], None
+    for i in range(n):
+        here, previous = order[i], order[i - 1] if i else None
+        if active[here] and start is None:
+            start = i
+        elif active[here] and sign[here] != sign[order[start]]:
+            runs.append((start, i - 1)); start = i
+        elif not active[here] and start is not None:
+            runs.append((start, i - 1)); start = None
+    if start is not None:
+        runs.append((start, n - 1))
+    clusters = []
+    for first, last in runs:
+        hours = sorted(order[i] for i in range(first, last + 1))
+        clusters.append({"hours": hours,
+                         "mass": float(sum(statistic[order[i]] for i in range(first, last + 1))),
+                         "sign": int(sign[order[first]])})
+    return clusters
+
+
+def cluster_permutation(hourly: pd.DataFrame, groups: dict[str, list[str]],
+                        threshold: float = CLUSTER_FORMING_THRESHOLD) -> dict:
+    """Where in the day do the groups differ? An hour-by-hour cluster test.
+
+    Collapsing a 24-hour profile into IS, IV or RA answers "is the day shaped
+    differently" but never "at which hours", and testing all 24 hours separately
+    would be 24 tests. The cluster approach tests contiguous runs of hours as
+    single units: hours are standardised against their own null distribution,
+    runs exceeding ``threshold`` are formed, and each run's summed statistic is
+    compared with the largest run produced by relabelled data. It therefore
+    corrects for the 24 comparisons while staying sensitive to an effect spread
+    thinly over several adjacent hours -- which is what a phase shift looks like.
+
+    ``hourly`` is one row per animal with columns AnimalName and 0..23. The
+    permutation is exact: at four animals per group there are only 70 labellings.
+    """
+    members = [a for group in groups.values() for a in group]
+    frame = hourly.set_index("AnimalName").reindex(members).dropna()
+    kept = list(frame.index)
+    (name_a, group_a), (name_b, _) = list(groups.items())
+    labels = np.array([animal in group_a for animal in kept])
+    values = frame[list(range(24))].to_numpy(dtype=float)
+    if labels.sum() < 2 or (~labels).sum() < 2:
+        return {"clusters": [], "n_animals": len(kept), "n_permutations": 0}
+
+    def difference(mask: np.ndarray) -> np.ndarray:
+        return values[mask].mean(axis=0) - values[~mask].mean(axis=0)
+
+    splits = _label_splits(len(kept), int(labels.sum()))
+    null = np.array([difference(mask) for mask in splits])
+    null_mean, null_sd = null.mean(axis=0), null.std(axis=0, ddof=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        def standardise(raw: np.ndarray) -> np.ndarray:
+            return np.where(null_sd > 0, (raw - null_mean) / null_sd, np.nan)
+        observed = standardise(difference(labels))
+        null_max = np.array([max((abs(c["mass"]) for c in _find_clusters(standardise(row), threshold)),
+                                 default=0.0) for row in null])
+    clusters = _find_clusters(observed, threshold)
+    for cluster in clusters:
+        cluster["p_value"] = float((null_max >= abs(cluster["mass"])).mean())
+        cluster["direction"] = f"{name_a} higher" if cluster["sign"] > 0 else f"{name_a} lower"
+    return {"clusters": sorted(clusters, key=lambda c: -abs(c["mass"])),
+            "n_animals": len(kept), "n_permutations": len(splits),
+            "threshold": threshold, "dropped": [a for a in members if a not in kept]}

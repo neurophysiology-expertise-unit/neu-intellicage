@@ -26,6 +26,7 @@ neu-intellicage qc '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/qc
 neu-intellicage tier1 '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/tier1
 neu-intellicage tier2 '/path/to/Sessions/2026-07-13 13.13.43' --output outputs/tier2
 neu-intellicage all '/path/to/verstreken/Sessions' --session '2026-07-13 13.13.43' --output outputs
+neu-intellicage peek '/path/to/Sessions/2026-08-25 13.30.51'          # daily check
 neu-intellicage experiment-report experiment.json --output /path/to/project/analysis/experiments/name
 scripts/render_report.sh /path/to/project/analysis/experiments/name
 ```
@@ -105,6 +106,35 @@ the software does not guess protocol meaning from filenames. The experiment
 directory also gets its own `provenance.json` recording the configuration file
 and its hash, so a report can always be traced to the configuration that made it.
 
+### Daily peek
+
+`neu-intellicage peek <session>` answers "are they learning yet?" in one screen.
+It reads the task from the export -- fixed-target place learning, clockwise
+patrolling, or an unconditioned session -- and gives one line per mouse with the
+hit rate, the rate that mouse would have to beat given the number of choices it
+has actually made, and a verdict. Add `--output DIR` for a cumulative-record
+figure and CSVs. Early in a protocol the verdict is usually "not yet decidable",
+which is the honest answer and the reason the tool exists.
+
+**Patrolling chance is 1/3, not 1/4.** The rewarded corner is never the one the
+animal is standing in, so a mouse that has learned only "do not re-enter the
+corner I just left" already scores 1/3. The all-visits rate against 1/4 is
+reported alongside, marked as the flattering comparison.
+
+### Circadian analysis
+
+`circadian.py` adds a cosinor fit (mesor, amplitude, acrophase) and the M10/L5
+decomposition behind RA, ported from `neu-oldenlabs`. Acrophase is CIRCULAR:
+eight mice peaking between 22:56 and 00:36 average to 11:51 by an ordinary mean,
+so it is excluded from the linear scan and tested by `compare_phase`, which
+permutes a difference of circular means.
+
+`groups.cluster_permutation` tests the 24-hour profile hour by hour, forming
+clusters of adjacent hours and comparing each cluster's mass with the largest
+produced by relabelled data. It answers "at which hours do the groups differ",
+which IS/IV/RA cannot, while correcting for the 24 comparisons. Clock hours are
+treated as circular, so a cluster may wrap midnight.
+
 ### Between-group statistics
 
 Add `groups` and `group_measures` to `experiment.json` and the report gains a
@@ -115,4 +145,7 @@ whatever the p-value. The table also prints `min_attainable_p`: with four mice
 per group the smallest possible p-value is 0.029, so a larger p means the design
 could not resolve an effect, not that there is none. Measure kinds are
 `nosepoke_probability`, `programmed_target_accuracy`, `daily_accuracy_slope`, and
-`preference_shift`; each takes an explicit list of `dates`.
+`preference_shift`; each takes an explicit list of `dates`. Add a `profile_scan`
+block to sweep the whole behavioural profile with Benjamini-Hochberg correction;
+the report refuses to present a session as a treatment comparison when the groups
+did not run under the same corner contingency.
