@@ -198,6 +198,13 @@ groups correlate near 1 simply because they encode the same eight-way ordering.
 It is a reading order, not a multiplicity correction — the FDR is still computed
 over the whole scan.
 
+`exclude_days` drops named ZT days for the whole cohort. Use it for days the cage
+was not measuring behaviour -- a corner that stops delivering water changes how
+often and how regularly every mouse visits, which no learning measure notices but
+every activity measure absorbs. Run the report twice, with and without, and treat
+a measure that survives both as the robust one. The shipped example config leaves
+it out so the primary run uses every complete day.
+
 Actograms are **single-plotted** by default. Double-plotting keeps a *drifting*
 onset continuous across the midnight boundary; under a fixed light schedule with
 no drift it prints every datum twice and halves each cell's width. `double: true`
