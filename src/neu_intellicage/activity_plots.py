@@ -123,7 +123,7 @@ def actogram(session, output: Path, lights_on: int = LIGHTS_ON,
         subtitle += "   ·   red flag = " + ", ".join(flagged)
     fig.suptitle(f"{title}\n{subtitle}   ·   scale 0–{vmax:.0f} visits/h",
                  fontsize=11, color=INK)
-    fig.subplots_adjust(left=.13, right=.99, top=.93, bottom=.06, hspace=.42)
+    fig.subplots_adjust(left=.175, right=.99, top=.93, bottom=.06, hspace=.42)
     fig.savefig(output / ("actogram_zt_double.png" if double else "actogram_zt.png"),
                 dpi=170, facecolor="white")
     plt.close(fig)
