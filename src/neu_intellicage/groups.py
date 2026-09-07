@@ -323,3 +323,145 @@ def animals_needed(effect_g: float, target_power: float = 0.8,
     needed = next((n for n in candidates if curve[n] >= target_power), None)
     return {"effect_g": abs(effect_g), "needed": needed,
             "target_power": target_power, "power": curve}
+
+
+def select_headline_measures(scan: pd.DataFrame, profile: pd.DataFrame,
+                             max_correlation: float = 0.95,
+                             limit: int = 6) -> pd.DataFrame:
+    """Thin a scan down to measures that are not restatements of each other.
+
+    A profile scan is not a set of independent tests. Some pairs are dependent
+    by construction -- RA is a function of M10 and L5, so on this cohort the
+    L5/RA correlation is -1.00 -- and reporting both as separate "hits" triples
+    the apparent evidence for one fact. This walks the scan from the strongest
+    contrast down and keeps a measure only when its absolute Pearson
+    correlation with every already-kept measure is below ``max_correlation``.
+
+    The threshold is deliberately high. With eight animals, any two measures
+    that both separate the groups correlate near 1 simply because they encode
+    the same eight-way ordering; a threshold of 0.8 would therefore prune
+    genuine, distinct findings as "redundant". Only near-deterministic
+    dependence -- the kind that comes from one measure being defined in terms of
+    another -- is removed here.
+
+    The result is a reading order, NOT a multiplicity correction: the p-values
+    are unchanged and the FDR in `scan_profile` is still computed over the full
+    scan, because the tests were all performed whether or not they are shown.
+    """
+    if scan.empty:
+        return scan.assign(headline=[], redundant_with=[])
+    ranked = scan.sort_values(["p_value", "measure"]).reset_index(drop=True)
+    kept, redundant = [], {}
+    for measure in ranked["measure"]:
+        if measure not in profile:
+            continue
+        clash = None
+        for chosen in kept:
+            pair = profile[[measure, chosen]].dropna()
+            if len(pair) < 3:
+                continue
+            r = float(pair[measure].corr(pair[chosen]))
+            if np.isfinite(r) and abs(r) >= max_correlation:
+                clash = f"{chosen} (r={r:+.2f})"
+                break
+        if clash is None:
+            if len(kept) < limit:
+                kept.append(measure)
+        else:
+            redundant[measure] = clash
+    out = ranked.copy()
+    out["headline"] = out["measure"].isin(kept)
+    out["redundant_with"] = out["measure"].map(redundant).fillna("")
+    return out
+
+
+def _group_arrays(values: pd.DataFrame, measure: str, groups: dict[str, list[str]]):
+    (_, members_a), (_, members_b) = list(groups.items())
+    series = values.dropna(subset=[measure]).set_index("AnimalName")[measure].astype(float)
+    a = series.reindex([m for m in members_a if m in series.index]).to_numpy()
+    b = series.reindex([m for m in members_b if m in series.index]).to_numpy()
+    return a, b
+
+
+def session_interaction_p(per_session: pd.DataFrame, measure: str,
+                          groups: dict[str, list[str]]) -> dict:
+    """Does the group difference in ``measure`` change across sessions?
+
+    ``per_session`` holds one row per animal per session with columns
+    ``AnimalName``, ``session`` and ``measure``. The statistic is the spread
+    (max minus min) of the per-session group difference; the null is that the
+    group LABEL is arbitrary, so the same animal-level permutation is applied to
+    every session at once. Permuting each session independently would test a
+    different and uninteresting null in which an animal could be knockdown in
+    one session and control in the next.
+
+    A non-significant result here is the useful one: it licenses pooling the
+    sessions, because it fails to detect a difference that varies between them.
+    Note what it cannot do -- with 4 vs 4 this test has the same 2/70 floor and
+    far less power than the main contrast, so "no interaction" is weak evidence,
+    not a demonstration of homogeneity.
+    """
+    (name_a, members_a), (name_b, members_b) = list(groups.items())
+    frame = per_session.dropna(subset=[measure])
+    sessions = sorted(frame["session"].unique())
+    animals = [a for a in members_a + members_b
+               if a in set(frame["AnimalName"])]
+    table = (frame.pivot_table(index="AnimalName", columns="session", values=measure)
+             .reindex(index=animals, columns=sessions))
+    if table.isna().to_numpy().any() or len(sessions) < 2:
+        return {"measure": measure, "sessions": sessions, "p_value": float("nan"),
+                "observed_spread": float("nan"), "per_session_difference": {},
+                "note": "needs every animal measured in every session, and 2+ sessions"}
+    matrix = table.to_numpy(dtype=float)
+    n_a = sum(1 for a in animals if a in set(members_a))
+
+    def spread(mask: np.ndarray) -> float:
+        differences = matrix[mask].mean(axis=0) - matrix[~mask].mean(axis=0)
+        return float(differences.max() - differences.min())
+
+    observed_mask = np.array([a in set(members_a) for a in animals])
+    observed = spread(observed_mask)
+    extreme = total = 0
+    for pick in combinations(range(len(animals)), n_a):
+        mask = np.zeros(len(animals), dtype=bool)
+        mask[list(pick)] = True
+        total += 1
+        if spread(mask) >= observed - 1e-12:
+            extreme += 1
+    per_session = {session: float(matrix[observed_mask, i].mean() - matrix[~observed_mask, i].mean())
+                   for i, session in enumerate(sessions)}
+    return {"measure": measure, "sessions": sessions, "p_value": extreme / total,
+            "observed_spread": observed, "permutations": total,
+            "group_a": name_a, "group_b": name_b,
+            "per_session_difference": per_session}
+
+
+def days_to_separation(daily: pd.DataFrame, measure: str, phase: str,
+                       groups: dict[str, list[str]]) -> pd.DataFrame:
+    """Re-run the contrast on the first k days, for k = 1..n.
+
+    Answers the operational question directly: how long must the cage run before
+    the contrast stops flickering? Because the animals are the same every day,
+    this curve says nothing about how many ANIMALS are needed -- it is about
+    measurement noise per animal, not about the design's resolution floor.
+    """
+    frame = daily[daily["measure"].eq(measure) & daily["phase"].eq(phase)]
+    days = sorted(frame["zt_day"].unique())
+    rows = []
+    for k in range(1, len(days) + 1):
+        window = frame[frame["zt_day"].isin(days[:k])]
+        per_animal = (window.groupby("AnimalName", as_index=False)["value"].mean()
+                      .rename(columns={"value": measure}))
+        try:
+            a, b = _group_arrays(per_animal, measure, groups)
+            if len(a) < 2 or len(b) < 2:
+                continue
+            p, _, _ = exact_permutation_p(a, b)
+        except (ValueError, KeyError):
+            continue
+        # Positive margin = a clean gap between the two groups' ranges;
+        # negative = the ranges overlap by that much.
+        margin = float(max(b.min() - a.max(), a.min() - b.max()))
+        rows.append({"days": k, "p_value": p, "difference": float(a.mean() - b.mean()),
+                     "hedges_g": hedges_g(a, b), "separated": margin > 0, "margin": margin})
+    return pd.DataFrame(rows)

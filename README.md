@@ -149,3 +149,58 @@ could not resolve an effect, not that there is none. Measure kinds are
 block to sweep the whole behavioural profile with Benjamini-Hochberg correction;
 the report refuses to present a session as a treatment comparison when the groups
 did not run under the same corner contingency.
+
+### Activity report (spontaneous behaviour, not learning)
+
+```
+neu-intellicage activity-report activity.json --output out/
+```
+
+A second, independent report that asks how the mice behave when nothing is being
+asked of them. It exists because a spontaneous-activity phenotype does not
+require a knockdown to survive a training protocol, and stays measurable when the
+contingency changes or a corner breaks — the reasoning `plan.md` takes from
+Voikar et al. (2018).
+
+Three conventions differ from the learning report:
+
+- **Zeitgeber time.** A day runs lights-on to lights-on. With a 19:00–07:00 dark
+  phase a calendar day splits the night across two rows and puts the halves at
+  opposite ends of every plot.
+- **Complete days only.** A ZT day is used only when its full 24 h lies inside
+  the recorded span. A partial day is not a quiet day: averaging the two together
+  deflates every rate and rotates the estimated phase. On the patrolling session,
+  partial end days alone produced a spurious −0.2 h/day acrophase drift.
+- **Phase splitting.** Every measure that can be computed on a subset of visits is
+  computed three times — whole day, light, dark. Measures already defined over the
+  24-hour cycle (IS, IV, RA, M10, L5, cosinor) are not split, because a
+  light-phase-only IS is a different quantity, not a weaker one.
+
+Sessions are pooled after centring each day on that day's cohort mean, so a
+between-session shift in overall activity — the same mice are 58% nocturnal under
+free adaptation and 83% during place acquisition — cannot drive a between-group
+contrast. Centring subtracts one number from every animal on a day, so each day's
+group difference is untouched; only the weighting of days changes.
+
+The report also prints what pooling can and cannot buy. `groups.days_to_separation`
+re-runs the contrast on the first k days, which shows whether a measure has
+settled; `groups.session_interaction_p` asks whether the difference itself changes
+between sessions, permuting the animal label once and applying it to every session
+so a mouse cannot change group midway. Neither can lower the design floor: with
+four animals per group the smallest attainable p is 2/70 = 0.029 no matter how
+many days are recorded, because days are repeated measures on the same animals and
+only animals are randomised.
+
+`groups.select_headline_measures` marks measures that are not restatements of one
+another (RA is a function of L5, so on this cohort they correlate at −1.00). The
+threshold is deliberately high: at n=8 any two measures that both separate the
+groups correlate near 1 simply because they encode the same eight-way ordering.
+It is a reading order, not a multiplicity correction — the FDR is still computed
+over the whole scan.
+
+Actograms are **single-plotted** by default. Double-plotting keeps a *drifting*
+onset continuous across the midnight boundary; under a fixed light schedule with
+no drift it prints every datum twice and halves each cell's width. `double: true`
+in the config restores the convention. `activity_plots.reward_failure` is the
+figure that separates hardware from behaviour: a broken valve fails at every hour
+of the day and night, an animal losing interest in a corner does not.

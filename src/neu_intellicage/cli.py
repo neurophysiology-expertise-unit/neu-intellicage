@@ -9,6 +9,7 @@ from .peek import peek
 from .plots import qc, tier1, tier2
 from .provenance import write_provenance
 from .report import build_experiment_report
+from .report_activity import build_activity_report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -20,6 +21,9 @@ def parser() -> argparse.ArgumentParser:
         if name == "tier2": cmd.add_argument("--block-size", type=int, default=100)
     all_cmd = sub.add_parser("all"); all_cmd.add_argument("sessions"); all_cmd.add_argument("--session", required=True); all_cmd.add_argument("--output", required=True); all_cmd.add_argument("--block-size", type=int, default=100)
     report = sub.add_parser("experiment-report"); report.add_argument("config"); report.add_argument("--output", required=True)
+    act = sub.add_parser("activity-report",
+                         help="spontaneous-activity phenotype across sessions (not learning)")
+    act.add_argument("config"); act.add_argument("--output", required=True)
     look = sub.add_parser("peek", help="daily one-look check on whether the animals are learning")
     look.add_argument("session"); look.add_argument("--output")
     return p
@@ -36,6 +40,9 @@ def main() -> None:
             write_provenance(output, session.path, {"command": "peek"})
             print(f"\nwrote {output}/peek.png, peek_summary.csv, peek_cumulative.csv")
         return
+    if args.command == "activity-report":
+        build_activity_report(args.config, args.output)
+        print(f"wrote {args.output}/report.md, figures/, tables/, provenance.json"); return
     if args.command == "experiment-report":
         print(build_experiment_report(args.config, args.output)); return
     if args.command == "inventory":
