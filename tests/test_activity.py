@@ -220,3 +220,21 @@ def test_describe_and_domain_cover_every_phase_column():
     for column in activity.measure_columns(profile):
         assert activity.domain_of(column) != "Other", column
         assert activity.describe(column) != column, column
+
+
+def test_excluded_days_are_dropped_for_every_animal():
+    """A hardware-fault day must leave the cohort together, not one mouse."""
+    visits = make_visits(days=5, per_hour=4)
+    full = activity.daily_measures(visits)
+    trimmed = activity.daily_measures(visits, exclude_days=["2026-08-12", "2026-08-13"])
+    assert trimmed["zt_day"].nunique() == full["zt_day"].nunique() - 2
+    counts = trimmed.groupby("AnimalName")["zt_day"].nunique()
+    assert set(counts) == {trimmed["zt_day"].nunique()}
+    kept = {str(d.date()) for d in trimmed["zt_day"].unique()}
+    assert "2026-08-12" not in kept and "2026-08-13" not in kept
+
+
+def test_excluding_every_day_yields_an_empty_table_not_a_crash():
+    visits = make_visits(days=3, per_hour=4)
+    days = [str(d.date()) for d in activity.complete_days(visits)]
+    assert activity.daily_measures(visits, exclude_days=days).empty

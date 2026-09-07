@@ -84,12 +84,17 @@ def build_activity_report(config_path: str | Path, output: str | Path) -> str:
     (name_a, members_a), (name_b, members_b) = list(groups.items())
     root = Path(config.get("sessions_root", "."))
 
+    # Days the cage was not measuring what it claims to -- a dead corner changes
+    # every animal's visit rate and regularity, so an activity measure taken
+    # then is about the hardware, not the mouse.
+    exclude_days = list(config.get("exclude_days") or [])
     sessions, daily, coverage = {}, {}, []
     for entry in config["sessions"]:
         label, path = entry["label"], root / entry["path"]
         session = load_session(path)
         sessions[label] = session
-        table = activity.daily_measures(session, lights_on, lights_off)
+        table = activity.daily_measures(session, lights_on, lights_off,
+                                        exclude_days=exclude_days)
         daily[label] = table
         span = activity.add_zeitgeber(session.visits, lights_on, lights_off)
         coverage.append({
@@ -217,6 +222,7 @@ def build_activity_report(config_path: str | Path, output: str | Path) -> str:
         "sessions": [entry["path"] for entry in config["sessions"]],
         "groups": groups, "centre_days": bool(config.get("centre_days", True)),
         "measures_scanned": len(scan), "design_floor_p": floor,
+        "excluded_days": exclude_days,
     })
     return text
 
@@ -277,6 +283,13 @@ def _render(config, coverage, scan, session_table, interactions, curves,
                           ("first", "First visit", "s"), ("last", "Last visit", "s"),
                           ("complete_zt_days", "Complete ZT days", "d")]), "",
     ]
+    excluded = list(config.get("exclude_days") or [])
+    if excluded:
+        lines += ["> **Days excluded.** " + ", ".join(excluded) + ".",
+                  "> These ZT days are dropped for every animal, so the groups still rest on the",
+                  "> same days. They are excluded because the cage was not measuring what it claims",
+                  "> to -- a corner that stops delivering water changes how often and how regularly",
+                  "> every mouse visits, and no learning measure would notice.", ""]
     if label_warnings:
         lines += ["### Group labels", "",
                   "Every test below uses the grouping given in the config, which comes from the",

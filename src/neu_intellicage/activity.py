@@ -247,18 +247,31 @@ def _one_block(frame: pd.DataFrame, hours: float) -> dict:
 
 
 def daily_measures(source, lights_on: int = LIGHTS_ON,
-                   lights_off: int = LIGHTS_OFF) -> pd.DataFrame:
+                   lights_off: int = LIGHTS_OFF,
+                   exclude_days: list | None = None) -> pd.DataFrame:
     """Long table: one value per animal, complete ZT day, phase and measure.
 
     Every animal gets a row for every complete day and phase even when it made
     no visit at all, so a mouse that went quiet is a low value rather than a
     missing row that silently drops out of the mean.
+
+    ``exclude_days`` drops named ZT days outright. It is for days the cage was
+    not measuring what it claims to -- a corner delivering no water changes how
+    often and how regularly every animal visits, which contaminates activity
+    measures even though no learning measure would notice. Excluded days are
+    dropped for ALL animals, never for one, so the groups keep resting on the
+    same days.
     """
     visits = visits_with_nosepokes(source)
     x = add_zeitgeber(visits, lights_on, lights_off)
     days = complete_days(visits, lights_on)
     if not days:
         return pd.DataFrame(columns=["AnimalName", "zt_day", "phase", "measure", "value"])
+    if exclude_days:
+        dropped = {pd.Timestamp(day).normalize() for day in exclude_days}
+        days = [day for day in days if day not in dropped]
+        if not days:
+            return pd.DataFrame(columns=["AnimalName", "zt_day", "phase", "measure", "value"])
     x = x[x["zt_day"].isin(days)]
     animals = sorted(add_time_fields(visits)["AnimalName"].unique())
     day_length = (lights_off - lights_on) % 24
