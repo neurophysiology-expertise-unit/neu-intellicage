@@ -199,3 +199,59 @@ def trials_to_criterion(blocks: pd.DataFrame, threshold: float = 0.5, consecutiv
         rows.append({"AnimalName": animal, "trials_to_criterion": trial, "threshold": threshold,
                      "consecutive_blocks": consecutive, "min_block_visits": floor})
     return pd.DataFrame(rows)
+
+
+def corner_health(visits: pd.DataFrame, recent_hours: int = 48,
+                  expected_corners: tuple[int, ...] = (1, 2, 3, 4)) -> pd.DataFrame:
+    """Per-corner hardware check: is a rewarded visit actually paying out?
+
+    A corner can fail in two ways that no learning measure will report as a
+    fault, because the controller still scores the visit as correct:
+
+    * the reward does not arrive -- the animal makes the right choice and gets
+      nothing, so it extinguishes on that corner and the learning curve falls
+      for a plumbing reason;
+    * the corner becomes hard to enter, so visits to it collapse while the
+      target sitting there cannot be satisfied, and every following visit is an
+      error.
+
+    Both happened in the 25 August patrolling session -- corner 2 half-failed
+    for two days, and corner 3's water stopped on 3 September and was ~90% dry
+    four days later -- and neither is visible in a hit rate. ``dry_rate`` is the
+    share of REWARDED visits at a corner with no licks recorded; ``visit_share``
+    is that corner's share of all visits, which should sit near 1/n_corners in a
+    patrolling protocol.
+    """
+    x = visits.copy()
+    if "LickNumber" not in x or "CornerCondition" not in x:
+        return pd.DataFrame()
+    cutoff = x["Start"].max() - pd.Timedelta(hours=recent_hours)
+    # Iterate over the cage's four corners, not the corners present in the data.
+    # A corner that fails completely produces NO rows, so grouping by what is
+    # there would drop it from the table and make the worst possible fault the
+    # one thing this check cannot see.
+    rows = []
+    for corner in expected_corners:
+        frame = x[x["Corner"].eq(corner)]
+        rewarded = frame[frame["CornerCondition"].eq(1)]
+        recent = rewarded[rewarded["Start"] >= cutoff]
+        rows.append({
+            "Corner": int(corner),
+            "visits": len(frame),
+            "visit_share": len(frame) / len(x),
+            "rewarded_visits": len(rewarded),
+            "dry_rate_overall": float(rewarded["LickNumber"].eq(0).mean()) if len(rewarded) else np.nan,
+            "dry_rate_recent": float(recent["LickNumber"].eq(0).mean()) if len(recent) else np.nan,
+            "rewarded_visits_recent": len(recent),
+            "mean_licks": float(rewarded["LickNumber"].mean()) if len(rewarded) else np.nan,
+        })
+    health = pd.DataFrame(rows)
+    expected = 1 / len(expected_corners)
+    health["visit_share_ratio"] = health["visit_share"] / expected
+    # A quarter of correct choices going unrewarded is already enough to change
+    # behaviour, so that is the warning line rather than a majority.
+    health["status"] = np.where(health["dry_rate_recent"] >= 0.5, "FAILED",
+                        np.where(health["dry_rate_recent"] >= 0.25, "degraded",
+                        np.where(health["visit_share_ratio"] <= 0.6, "under-visited", "ok")))
+    health.loc[health["visits"].eq(0), "status"] = "NO VISITS"
+    return health

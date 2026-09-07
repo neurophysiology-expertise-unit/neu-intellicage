@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from .io import Session
-from .metrics import CHANCE, add_time_fields, chance_boundary
+from .metrics import CHANCE, add_time_fields, chance_boundary, corner_health
 from .patrolling import NAIVE_CHANCE, PATROL_CHANCE, detect_task, patrol_cumulative, patrol_daily
 
 
@@ -83,7 +83,22 @@ def peek(session: Session, output: Path | None = None) -> tuple[str, pd.DataFram
     totals["chance"] = chance
 
     days = add_time_fields(session.visits)["date"]
-    header = [
+    health = corner_health(session.visits)
+    alarm = []
+    if not health.empty and (health["status"] != "ok").any():
+        alarm = ["", "!! HARDWARE WARNING -- check the cage before reading anything below."]
+        for _, row in health[health["status"] != "ok"].iterrows():
+            if row["status"] in ("FAILED", "degraded"):
+                alarm.append(f"   Corner {int(row['Corner'])}: {row['status']} -- "
+                             f"{row['dry_rate_recent']:.0%} of correct visits in the last 48 h "
+                             f"delivered NO water ({int(row['rewarded_visits_recent'])} rewarded "
+                             f"visits). The animals are being extinguished on this corner.")
+            else:
+                alarm.append(f"   Corner {int(row['Corner'])}: under-visited -- "
+                             f"{row['visit_share']:.0%} of all visits against an expected "
+                             f"{1 / len(health):.0%}. Check that it can be entered.")
+        alarm.append("")
+    header = alarm + [
         f"Task detected from the export: {task.upper()}"
         + (" (clockwise 1->2->3->4, target advances only on a hit)" if task == "patrolling" else ""),
         f"Recorded {days.nunique()} day(s): {days.min()} to {days.max()}",
@@ -121,6 +136,8 @@ def peek(session: Session, output: Path | None = None) -> tuple[str, pd.DataFram
     if output is not None:
         output.mkdir(parents=True, exist_ok=True)
         totals.to_csv(output / "peek_summary.csv", index=False)
+        if not health.empty:
+            health.to_csv(output / "peek_corner_health.csv", index=False)
         cumulative.to_csv(output / "peek_cumulative.csv", index=False)
         _plot(cumulative, totals, task, chance, denominator, output)
 
